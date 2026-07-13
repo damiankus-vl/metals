@@ -12,6 +12,7 @@ import scala.meta.internal.metals.Configs.ProtobufLspConfig
 import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.PositionSyntax._
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
+import scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles
 import scala.meta.internal.mtags.GlobalSymbolIndex
 import scala.meta.internal.mtags.KeywordWrapper.Scala3SoftKeywords
 import scala.meta.internal.mtags.Mtags
@@ -174,21 +175,60 @@ final class DefinitionProvider(
       else List(fromCompiler, fromSemanticDb, fromScalaDoc, fromFallback)
 
     for {
-      result <- strategies.foldLeft(Future.successful(DefinitionResult.empty)) {
-        case (acc, next) =>
-          acc.flatMap {
-            case res if res.isEmpty && !res.symbol.endsWith("/") =>
-              next().map(_.getOrElse(res))
-            case res => Future.successful(res)
-          }
+      resolved <- strategies.foldLeft(
+        Future.successful(DefinitionResult.empty)
+      ) { case (acc, next) =>
+        acc.flatMap {
+          case res if res.isEmpty && !res.symbol.endsWith("/") =>
+            next().map(_.getOrElse(res))
+          case res => Future.successful(res)
+        }
       }
     } yield {
+      val result = fallbackToDecompiledClasspath(path, resolved)
       reportBuilder
         .build(scalaVersionSelector)
         .foreach(r => rc.unsanitized().create(() => r))
       protobufDefinitions.enhanceWithProtobufDefinition(result)
     }
   }
+
+  /**
+   * When goto-definition inside a materialized proto Java outline resolves a
+   * JVM library symbol (e.g. `com.google.protobuf.GeneratedMessageV3`) but
+   * finds no source, point at the class on the compiler classpath. Opening it
+   * triggers Metals' existing decompilation. In MBT/Bazel workspaces the
+   * dependency source jars aren't indexed, so this is the only way such
+   * references become navigable.
+   */
+  private def fallbackToDecompiledClasspath(
+      path: AbsolutePath,
+      result: DefinitionResult,
+  ): DefinitionResult = {
+    if (
+      result.isEmpty &&
+      isNavigableJvmClass(result.symbol) &&
+      isMaterializedProtoJava(path)
+    ) {
+      compilers().classFileLocationOnClasspath(result.symbol) match {
+        case Some(location) =>
+          DefinitionResult(
+            ju.Collections.singletonList(location),
+            result.symbol,
+            None,
+            None,
+            result.querySymbol,
+          )
+        case None => result
+      }
+    } else result
+  }
+
+  private def isMaterializedProtoJava(path: AbsolutePath): Boolean =
+    ProtoGeneratedJavaFiles.protoPathFor(workspace, path).isDefined
+
+  private def isNavigableJvmClass(symbol: String): Boolean =
+    symbol.nonEmpty && symbol.endsWith("#")
 
   def definition(
       path: AbsolutePath,

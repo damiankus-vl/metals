@@ -1563,6 +1563,66 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
     } yield ()
   }
 
+  // When the protobuf runtime's source jar is not indexed (as in Bazel/MBT
+  // workspaces, reproduced here with "skipSources"), goto-definition on a
+  // fully-qualified runtime supertype inside a materialized outline must still
+  // work by decompiling the class from the protobuf-java jar on the classpath.
+  test("java-navigates-to-decompiled-runtime-class-without-sources") {
+    cleanWorkspace()
+    val sessionOutline =
+      ".metals/readonly/dependencies/proto-generated/a/src/main/proto/client.proto/com/example/api/jproto/Session.java"
+    for {
+      _ <- initialize(
+        s"""|/metals.json
+            |{
+            |  "a": {
+            |    "libraryDependencies": [
+            |      "com.google.protobuf:protobuf-java:${BuildInfoVersions.protobufVersion}"
+            |    ],
+            |    "skipSources": true
+            |  }
+            |}
+            |/a/src/main/proto/client.proto
+            |syntax = "proto3";
+            |package com.example.api;
+            |option java_package = "com.example.api.jproto";
+            |option java_multiple_files = true;
+            |message Session {
+            |  string token = 1;
+            |}
+            |/a/src/main/java/com/example/Client.java
+            |package com.example;
+            |import com.example.api.jproto.Session;
+            |public class Client {
+            |  public void open(Session session) {}
+            |}
+            |""".stripMargin
+      )
+      _ <- server.didOpen("a/src/main/proto/client.proto")
+      _ <- server.didOpen("a/src/main/java/com/example/Client.java")
+      _ <- server.didFocus("a/src/main/java/com/example/Client.java")
+      // Navigating to Session materializes its generated outline on disk.
+      _ <- server.definitionSubstringQuery(
+        "a/src/main/java/com/example/Client.java",
+        "public void open(Sess@@ion session) {}",
+      )
+      _ <- server.didOpen(sessionOutline)
+      // GeneratedMessageV3 has no indexed source, so it must resolve by
+      // decompiling the class from the protobuf-java jar.
+      runtimeLocations <- server.definitionSubstringQuery(
+        sessionOutline,
+        "extends com.google.protobuf.GeneratedMessag@@eV3",
+      )
+      _ = assert(
+        runtimeLocations.exists(loc =>
+          loc.getUri().contains("protobuf-java") &&
+            loc.getUri().endsWith(".class")
+        ),
+        s"expected GeneratedMessageV3 to resolve into a decompiled protobuf-java class, got:\n${runtimeLocations.map(_.getUri()).mkString("\n")}",
+      )
+    } yield ()
+  }
+
   // Same as above but with the outer-class layout (no java_multiple_files),
   // like Bazel's worker_protocol.proto: all messages are nested in one
   // generated file, so type references inside the materialized outline resolve
