@@ -33,6 +33,7 @@ import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.decompile.DecompileBytecode
 import scala.meta.internal.metals.mbt.MbtBuild
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
+import scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles
 import scala.meta.internal.mtags.MD5
 import scala.meta.internal.mtags.Mtags
 import scala.meta.internal.parsing.Trees
@@ -1649,6 +1650,7 @@ class Compilers(
     def fromBuildTarget: Option[PresentationCompiler] = {
       val target = buildTargets
         .inverseSources(path)
+        .orElse(protoGeneratedJavaTarget(path))
 
       target match {
         case None =>
@@ -1683,6 +1685,24 @@ class Compilers(
     else if (path.isWorksheet)
       loadWorksheetCompiler(path).orElse(fromBuildTarget)
     else fromBuildTarget
+  }
+
+  /**
+   * A Java file materialized from a proto outline belongs to no build target;
+   * route it to the target that owns the `.proto` file it was generated from,
+   * so that code navigation inside it uses a presentation compiler that can
+   * resolve the other proto-generated classes instead of the bare fallback
+   * compiler.
+   */
+  private def protoGeneratedJavaTarget(
+      path: AbsolutePath
+  ): Option[BuildTargetIdentifier] = {
+    if (!path.isJavaFilename) None
+    else {
+      ProtoGeneratedJavaFiles
+        .protoPathFor(workspace, path)
+        .flatMap(buildTargets.inverseSources)
+    }
   }
 
   def loadWorksheetCompiler(
