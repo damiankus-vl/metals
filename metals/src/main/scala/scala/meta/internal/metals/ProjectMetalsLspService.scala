@@ -153,7 +153,7 @@ class ProjectMetalsLspService(
       interactiveSemanticdbs,
       languageClient,
       new ClassFinder(trees),
-      tables,
+      decompilationConsent,
     )
 
   protected val bspConfigGenerator: BspConfigGenerator = new BspConfigGenerator(

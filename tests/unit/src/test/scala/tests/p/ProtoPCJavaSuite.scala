@@ -2,6 +2,8 @@ package tests.p
 
 import scala.concurrent.Future
 
+import scala.meta.internal.metals.MetalsEnrichments._
+
 import org.eclipse.lsp4j.Location
 import tests.BuildInfoVersions
 
@@ -1571,6 +1573,15 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
     cleanWorkspace()
     val sessionOutline =
       ".metals/readonly/dependencies/proto-generated/a/src/main/proto/client.proto/com/example/api/jproto/Session.java"
+    // Decompiling the runtime class requires the user's consent.
+    client.showMessageRequestHandler = { params =>
+      if (params.getMessage().contains("decompile"))
+        params
+          .getActions()
+          .asScala
+          .find(_.getTitle() == "Always allow in this workspace")
+      else None
+    }
     for {
       _ <- initialize(
         s"""|/metals.json
@@ -1608,7 +1619,8 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
       )
       _ <- server.didOpen(sessionOutline)
       // GeneratedMessageV3 has no indexed source, so it must resolve by
-      // decompiling the class from the protobuf-java jar.
+      // decompiling the class from the protobuf-java jar, landing on the line
+      // where the class is declared (not the top of the file).
       runtimeLocations <- server.definitionSubstringQuery(
         sessionOutline,
         "extends com.google.protobuf.GeneratedMessag@@eV3",
@@ -1616,9 +1628,12 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
       _ = assert(
         runtimeLocations.exists(loc =>
           loc.getUri().contains("protobuf-java") &&
-            loc.getUri().endsWith(".class")
+            loc.getUri().endsWith(".class") &&
+            loc.getRange().getStart().getLine() > 0
         ),
-        s"expected GeneratedMessageV3 to resolve into a decompiled protobuf-java class, got:\n${runtimeLocations.map(_.getUri()).mkString("\n")}",
+        s"expected GeneratedMessageV3 to resolve into a decompiled protobuf-java class at the class declaration, got:\n${runtimeLocations
+            .map(loc => s"${loc.getUri()} @ ${loc.getRange().getStart().getLine()}")
+            .mkString("\n")}",
       )
     } yield ()
   }
