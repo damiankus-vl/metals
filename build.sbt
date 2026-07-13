@@ -1005,6 +1005,7 @@ lazy val mtest = project
       "kindProjector" -> V.kindProjector,
       "betterMonadicFor" -> V.betterMonadicFor,
       "lastSupportedSemanticdb" -> SemanticDbSupport.last,
+      "protobufVersion" -> V.protobuf,
     ),
     crossScalaVersions := V.nonDeprecatedScalaVersions,
     Compile / unmanagedSourceDirectories ++= multiScalaDirectories(
