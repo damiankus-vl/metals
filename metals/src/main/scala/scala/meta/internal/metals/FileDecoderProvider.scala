@@ -94,6 +94,7 @@ final class FileDecoderProvider(
     interactiveSemanticdbs: InteractiveSemanticdbs,
     languageClient: MetalsLanguageClient,
     classFinder: ClassFinder,
+    decompilationConsent: DecompilationConsent,
 )(implicit ec: ExecutionContext) {
 
   private case class PathInfo(
@@ -186,6 +187,29 @@ final class FileDecoderProvider(
     }
   }
 
+  /**
+   * Decompiling (or disassembling) a library's `.class` file reconstructs
+   * source-like output from its bytecode, which may be restricted by the
+   * library's license. Before showing such output we ask the user to confirm
+   * they are permitted to view it. The prompt is shown per file; choosing
+   * "Always allow in this workspace" persists the consent so it isn't asked
+   * again for the current workspace.
+   */
+  private def withDecompilationConsent(
+      uri: URI
+  )(decode: => Future[DecoderResponse]): Future[DecoderResponse] =
+    decompilationConsent.ensureConsent().flatMap {
+      case true => decode
+      case false =>
+        Future.successful(
+          DecoderResponse.success(
+            uri,
+            "// Decompilation cancelled: you did not confirm you are " +
+              "permitted to view this library's decompiled source.",
+          )
+        )
+    }
+
   private def convertJarStrToURI(uriAsStr: String): URI = {
     // Windows treats % literally:
     // https://learn.microsoft.com/en-us/troubleshoot/windows-client/networking/url-encoding-unc-paths-not-url-decoded
@@ -235,21 +259,29 @@ final class FileDecoderProvider(
         case Right(path) =>
           additionalExtension match {
             case "javap" =>
-              decodeJavaOrScalaOrClass(
-                path,
-                jar,
-                decodeJavapFromClassFile(false),
-              )
+              withDecompilationConsent(uri) {
+                decodeJavaOrScalaOrClass(
+                  path,
+                  jar,
+                  decodeJavapFromClassFile(false),
+                )
+              }
             case "javap-verbose" =>
-              decodeJavaOrScalaOrClass(
-                path,
-                jar,
-                decodeJavapFromClassFile(true),
-              )
+              withDecompilationConsent(uri) {
+                decodeJavaOrScalaOrClass(
+                  path,
+                  jar,
+                  decodeJavapFromClassFile(true),
+                )
+              }
             case "cfr" =>
-              decodeJavaOrScalaOrClass(path, jar, decodeCFRFromClassFile)
+              withDecompilationConsent(uri) {
+                decodeJavaOrScalaOrClass(path, jar, decodeCFRFromClassFile)
+              }
             case "class" =>
-              decodeJavaOrScalaOrClass(path, jar, decodeCFRFromClassFile)
+              withDecompilationConsent(uri) {
+                decodeJavaOrScalaOrClass(path, jar, decodeCFRFromClassFile)
+              }
             case "tasty-decoded" =>
               decodeTasty(path, jar)
             case "semanticdb-compact" =>

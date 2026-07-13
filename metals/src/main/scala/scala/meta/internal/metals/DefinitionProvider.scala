@@ -12,6 +12,7 @@ import scala.meta.internal.metals.Configs.ProtobufLspConfig
 import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.PositionSyntax._
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
+import scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles
 import scala.meta.internal.mtags.GlobalSymbolIndex
 import scala.meta.internal.mtags.KeywordWrapper.Scala3SoftKeywords
 import scala.meta.internal.mtags.Mtags
@@ -69,6 +70,7 @@ final class DefinitionProvider(
     definitionProviders: () => DefinitionProviderConfig,
     mbt: MbtWorkspaceSymbolProvider,
     protobufLspConfig: () => ProtobufLspConfig,
+    decompilationConsent: DecompilationConsent,
 )(implicit ec: ExecutionContext, rc: ReportContext) {
 
   private val fallback = new FallbackDefinitionProvider(trees, index)
@@ -174,14 +176,16 @@ final class DefinitionProvider(
       else List(fromCompiler, fromSemanticDb, fromScalaDoc, fromFallback)
 
     for {
-      result <- strategies.foldLeft(Future.successful(DefinitionResult.empty)) {
-        case (acc, next) =>
-          acc.flatMap {
-            case res if res.isEmpty && !res.symbol.endsWith("/") =>
-              next().map(_.getOrElse(res))
-            case res => Future.successful(res)
-          }
+      resolved <- strategies.foldLeft(
+        Future.successful(DefinitionResult.empty)
+      ) { case (acc, next) =>
+        acc.flatMap {
+          case res if res.isEmpty && !res.symbol.endsWith("/") =>
+            next().map(_.getOrElse(res))
+          case res => Future.successful(res)
+        }
       }
+      result <- fallbackToDecompiledClasspath(path, resolved)
     } yield {
       reportBuilder
         .build(scalaVersionSelector)
@@ -189,6 +193,54 @@ final class DefinitionProvider(
       protobufDefinitions.enhanceWithProtobufDefinition(result)
     }
   }
+
+  /**
+   * When goto-definition inside a materialized proto Java outline resolves a
+   * JVM library symbol (e.g. `com.google.protobuf.GeneratedMessageV3`) but
+   * finds no source, point at the class on the compiler classpath. In MBT/Bazel
+   * workspaces the dependency source jars aren't indexed, so this is the only
+   * way such references become navigable. Decompiling the class to find the
+   * exact line to jump to requires the user's consent (the same consent that
+   * gates showing the decompiled contents), so we ask before decompiling; if
+   * consent isn't granted we leave the definition empty.
+   */
+  private def fallbackToDecompiledClasspath(
+      path: AbsolutePath,
+      result: DefinitionResult,
+  ): Future[DefinitionResult] = {
+    if (
+      result.isEmpty &&
+      isNavigableJvmClass(result.symbol) &&
+      isMaterializedProtoJava(path)
+    ) {
+      compilers().classFileLocationOnClasspath(result.symbol) match {
+        case Some(location) =>
+          decompilationConsent.ensureConsent().flatMap {
+            case false => Future.successful(result)
+            case true =>
+              compilers()
+                .locateInsideDecompiledJar(result.symbol, Seq(location))
+                .map { located =>
+                  DefinitionResult(
+                    ju.Collections
+                      .singletonList(located.headOption.getOrElse(location)),
+                    result.symbol,
+                    None,
+                    None,
+                    result.querySymbol,
+                  )
+                }
+          }
+        case None => Future.successful(result)
+      }
+    } else Future.successful(result)
+  }
+
+  private def isMaterializedProtoJava(path: AbsolutePath): Boolean =
+    ProtoGeneratedJavaFiles.protoPathFor(workspace, path).isDefined
+
+  private def isNavigableJvmClass(symbol: String): Boolean =
+    symbol.nonEmpty && symbol.endsWith("#")
 
   def definition(
       path: AbsolutePath,

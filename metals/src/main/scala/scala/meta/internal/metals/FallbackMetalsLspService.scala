@@ -81,6 +81,7 @@ class FallbackMetalsLspService(
       interactiveSemanticdbs,
       languageClient,
       new ClassFinder(trees),
+      decompilationConsent,
     )
 
   private val files: AtomicReference[Set[AbsolutePath]] = new AtomicReference(

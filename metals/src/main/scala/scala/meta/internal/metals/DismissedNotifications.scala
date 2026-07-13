@@ -24,6 +24,7 @@ final class DismissedNotifications(conn: () => Connection, time: Time) {
   val RequestTimeout = new Notification(16)
   val ScalafixConfAmend = new Notification(17)
   val MbtImportChanges = new Notification(18)
+  val DecompilationConsent = new Notification(19)
 
   val all: List[Notification] = List(
     Only212Navigation,
@@ -42,6 +43,7 @@ final class DismissedNotifications(conn: () => Connection, time: Time) {
     RequestTimeout,
     ScalafixConfAmend,
     MbtImportChanges,
+    DecompilationConsent,
   )
 
   def resetAll(): Unit = {
