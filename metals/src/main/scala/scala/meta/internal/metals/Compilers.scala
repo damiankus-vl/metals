@@ -26,11 +26,11 @@ import scala.meta.inputs.Position
 import scala.meta.internal
 import scala.meta.internal.async.CompletableCancelToken
 import scala.meta.internal.builds.SbtBuildTool
-import scala.meta.internal.io.FileIO
 import scala.meta.internal.metals.CompilerOffsetParamsUtils
 import scala.meta.internal.metals.CompilerRangeParamsUtils
 import scala.meta.internal.metals.Compilers.PresentationCompilerKey
 import scala.meta.internal.metals.MetalsEnrichments._
+import scala.meta.internal.metals.decompile.ClassHierarchyTargetProvider
 import scala.meta.internal.metals.decompile.DecompileBytecode
 import scala.meta.internal.metals.mbt.MbtBuild
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
@@ -1584,64 +1584,22 @@ class Compilers(
   }
 
   /**
-   * Locates the `.class` for a JVM library symbol on the compiler classpath and
-   * returns it as a definition target. No bytecode is decompiled here: opening
-   * the returned `.class` location triggers Metals' existing decompilation
-   * (`FileDecoderProvider`), which is where the decompile happens and where the
-   * user is asked for consent. This is needed in MBT/Bazel workspaces where the
-   * presentation compiler resolves the symbol but attaches no location and the
-   * dependency source jars aren't indexed, so a reference like
-   * `com.google.protobuf.GeneratedMessageV3` otherwise has nowhere to jump to.
+   * Definition targets for a JVM library symbol that the presentation compiler
+   * resolved but left without a source location. See
+   * [[scala.meta.internal.metals.decompile.ClassHierarchyTargetProvider]].
    */
-  def classFileLocationOnClasspath(
+  def classHierarchyTargets(
       symbol: String
-  ): Option[l.Location] =
-    classFileRelativePath(symbol).flatMap { relativeClassPath =>
-      val classpathJars =
-        buildTargets.allWorkspaceJars ++
-          fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_))
-      classpathJars
-        .filter(jar => jar.filename.endsWith(".jar") && jar.exists)
-        .flatMap { jar =>
-          try {
-            FileIO.withJarFileSystem(jar, create = false) { root =>
-              val classFile = root.resolveZipPath(relativeClassPath)
-              Option.when(classFile.exists)(
-                new l.Location(
-                  classFile.toURI.toString,
-                  new l.Range(new l.Position(0, 0), new l.Position(0, 0)),
-                )
-              )
-            }
-          } catch {
-            case NonFatal(_) => None
-          }
-        }
-        .nextOption()
-    }
+  ): Future[Seq[(String, l.Location)]] =
+    classHierarchyTargetProvider.classHierarchyTargets(symbol)
 
-  /**
-   * Converts a SemanticDB type symbol into its `.class` entry path, mapping
-   * nested classes to `$`-separated binary names, for example
-   * `com/google/protobuf/AbstractMessage#Builder#` becomes
-   * `com/google/protobuf/AbstractMessage$Builder.class`.
-   */
-  private def classFileRelativePath(symbol: String): Option[Path] = {
-    val trimmed = symbol.stripSuffix("#").stripSuffix(".")
-    if (trimmed.isEmpty || trimmed.endsWith("/")) None
-    else {
-      val lastSlash = trimmed.lastIndexOf('/')
-      val (packagePrefix, className) =
-        if (lastSlash < 0) ("", trimmed)
-        else
-          (
-            trimmed.substring(0, lastSlash + 1),
-            trimmed.substring(lastSlash + 1),
-          )
-      val binaryName = className.replace('#', '$').replace('.', '$')
-      Some(Paths.get(s"$packagePrefix$binaryName.class"))
-    }
-  }
+  private val classHierarchyTargetProvider =
+    new ClassHierarchyTargetProvider(
+      () =>
+        buildTargets.allWorkspaceJars ++
+          fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_)),
+      mbtWorkspaceSymbolProvider.protoJavaOutlineFor(_),
+    )
 
   def signatureHelp(
       params: TextDocumentPositionParams,

@@ -12,7 +12,6 @@ import scala.meta.internal.metals.Configs.ProtobufLspConfig
 import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.PositionSyntax._
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
-import scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles
 import scala.meta.internal.mtags.GlobalSymbolIndex
 import scala.meta.internal.mtags.KeywordWrapper.Scala3SoftKeywords
 import scala.meta.internal.mtags.Mtags
@@ -195,14 +194,18 @@ final class DefinitionProvider(
   }
 
   /**
-   * When goto-definition inside a materialized proto Java outline resolves a
-   * JVM library symbol (e.g. `com.google.protobuf.GeneratedMessageV3`) but
-   * finds no source, point at the class on the compiler classpath. In MBT/Bazel
-   * workspaces the dependency source jars aren't indexed, so this is the only
-   * way such references become navigable. Decompiling the class to find the
-   * exact line to jump to requires the user's consent (the same consent that
-   * gates showing the decompiled contents), so we ask before decompiling; if
-   * consent isn't granted we leave the definition empty.
+   * When goto-definition from a Java file resolves a JVM library symbol (a type,
+   * or a member inherited from a compiled class) but finds no source, point at
+   * the class(es) on the compiler classpath. In MBT/Bazel workspaces the
+   * dependency source jars aren't indexed, so this is the only way such
+   * references become navigable; in other workspaces it only fires when nothing
+   * else resolved, so it is purely additive.
+   *
+   * For an inherited or multiply-overridden member every declaring class in the
+   * type hierarchy is offered (the client shows a picker). Decompiling to find
+   * the exact line requires the user's consent (the same consent that gates
+   * showing the decompiled contents); if consent isn't granted we leave the
+   * definition empty.
    */
   private def fallbackToDecompiledClasspath(
       path: AbsolutePath,
@@ -211,19 +214,29 @@ final class DefinitionProvider(
     if (
       result.isEmpty &&
       isNavigableJvmClass(result.symbol) &&
-      isMaterializedProtoJava(path)
+      path.isJavaFilename
     ) {
-      compilers().classFileLocationOnClasspath(result.symbol) match {
-        case Some(location) =>
+      compilers().classHierarchyTargets(result.symbol).flatMap { targets =>
+        if (targets.isEmpty) Future.successful(result)
+        else
           decompilationConsent.ensureConsent().flatMap {
             case false => Future.successful(result)
             case true =>
-              compilers()
-                .locateInsideDecompiledJar(result.symbol, Seq(location))
+              Future
+                .traverse(targets) { case (memberSymbol, location) =>
+                  compilers()
+                    .locateInsideDecompiledJar(memberSymbol, Seq(location))
+                    .map(_.headOption.getOrElse(location))
+                }
                 .map { located =>
+                  val deduped = located.distinctBy(location =>
+                    (
+                      location.getUri(),
+                      location.getRange().getStart().getLine(),
+                    )
+                  )
                   DefinitionResult(
-                    ju.Collections
-                      .singletonList(located.headOption.getOrElse(location)),
+                    deduped.asJava,
                     result.symbol,
                     None,
                     None,
@@ -231,16 +244,14 @@ final class DefinitionProvider(
                   )
                 }
           }
-        case None => Future.successful(result)
       }
     } else Future.successful(result)
   }
 
-  private def isMaterializedProtoJava(path: AbsolutePath): Boolean =
-    ProtoGeneratedJavaFiles.protoPathFor(workspace, path).isDefined
-
-  private def isNavigableJvmClass(symbol: String): Boolean =
-    symbol.nonEmpty && symbol.endsWith("#")
+  private def isNavigableJvmClass(symbol: String): Boolean = {
+    val sym = Symbol(symbol)
+    symbol.nonEmpty && sym.isGlobal && (sym.isType || sym.isMethod || sym.isTerm)
+  }
 
   def definition(
       path: AbsolutePath,
