@@ -197,12 +197,15 @@ final class DefinitionProvider(
   /**
    * When goto-definition inside a materialized proto Java outline resolves a
    * JVM library symbol (e.g. `com.google.protobuf.GeneratedMessageV3`) but
-   * finds no source, point at the class on the compiler classpath. In MBT/Bazel
-   * workspaces the dependency source jars aren't indexed, so this is the only
-   * way such references become navigable. Decompiling the class to find the
-   * exact line to jump to requires the user's consent (the same consent that
-   * gates showing the decompiled contents), so we ask before decompiling; if
-   * consent isn't granted we leave the definition empty.
+   * finds no source, decompile the class from the compiler classpath and
+   * materialize it as a read-only `.java` file, pointing at the line where the
+   * symbol is declared. In MBT/Bazel workspaces the dependency source jars
+   * aren't indexed, so this is the only way such references become navigable;
+   * materializing a `.java` file (rather than a `jar:...class` buffer) also
+   * lets goto-definition continue from inside the decompiled source.
+   * Decompiling requires the user's consent (the same consent that gates
+   * showing the decompiled contents), so we ask before decompiling; if consent
+   * isn't granted we leave the definition empty.
    */
   private def fallbackToDecompiledClasspath(
       path: AbsolutePath,
@@ -211,7 +214,7 @@ final class DefinitionProvider(
     if (
       result.isEmpty &&
       isNavigableJvmClass(result.symbol) &&
-      isMaterializedProtoJava(path)
+      isDecompileFallbackSource(path)
     ) {
       compilers().classFileLocationOnClasspath(result.symbol) match {
         case Some(location) =>
@@ -219,22 +222,33 @@ final class DefinitionProvider(
             case false => Future.successful(result)
             case true =>
               compilers()
-                .locateInsideDecompiledJar(result.symbol, Seq(location))
-                .map { located =>
-                  DefinitionResult(
-                    ju.Collections
-                      .singletonList(located.headOption.getOrElse(location)),
-                    result.symbol,
-                    None,
-                    None,
-                    result.querySymbol,
-                  )
+                .decompiledJavaFileLocation(result.symbol, location)
+                .map {
+                  case Some(materialized) =>
+                    DefinitionResult(
+                      ju.Collections.singletonList(materialized),
+                      result.symbol,
+                      Some(materialized.getUri().toAbsolutePath),
+                      None,
+                      result.querySymbol,
+                    )
+                  case None => result
                 }
           }
         case None => Future.successful(result)
       }
     } else Future.successful(result)
   }
+
+  /**
+   * Whether goto-definition inside `path` should fall back to decompiling a
+   * sourceless JVM class: either a materialized proto Java outline or a file
+   * that itself was decompiled (so navigation can chain from one decompiled
+   * class into another).
+   */
+  private def isDecompileFallbackSource(path: AbsolutePath): Boolean =
+    isMaterializedProtoJava(path) ||
+      DecompiledJavaFiles.isDecompiledJavaFile(workspace, path)
 
   private def isMaterializedProtoJava(path: AbsolutePath): Boolean =
     ProtoGeneratedJavaFiles.protoPathFor(workspace, path).isDefined

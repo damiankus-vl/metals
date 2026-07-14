@@ -1619,8 +1619,9 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
       )
       _ <- server.didOpen(sessionOutline)
       // GeneratedMessageV3 has no indexed source, so it must resolve by
-      // decompiling the class from the protobuf-java jar, landing on the line
-      // where the class is declared (not the top of the file).
+      // decompiling the class from the protobuf-java jar and materializing it
+      // as a read-only `.java` file, landing on the line where the class is
+      // declared (not the top of the file).
       runtimeLocations <- server.definitionSubstringQuery(
         sessionOutline,
         "extends com.google.protobuf.GeneratedMessag@@eV3",
@@ -1628,14 +1629,68 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
       _ = assert(
         runtimeLocations.exists(loc =>
           loc.getUri().contains("protobuf-java") &&
-            loc.getUri().endsWith(".class") &&
+            loc
+              .getUri()
+              .contains(
+                "/.metals/readonly/dependencies/decompiled/"
+              ) &&
+            loc.getUri().endsWith(".java") &&
             loc.getRange().getStart().getLine() > 0
         ),
-        s"expected GeneratedMessageV3 to resolve into a decompiled protobuf-java class at the class declaration, got:\n${runtimeLocations
+        s"expected GeneratedMessageV3 to resolve into a decompiled read-only .java file at the class declaration, got:\n${runtimeLocations
             .map(loc => s"${loc.getUri()} @ ${loc.getRange().getStart().getLine()}")
             .mkString("\n")}",
       )
+      // Navigation within the decompiled source: opening the materialized
+      // `.java` file and running goto-definition on a `com.google.protobuf`
+      // type reference in its import list must be treated as a Java file with a
+      // classpath and resolve (recursively decompiling that class, which also
+      // lacks source, and materializing it as another read-only `.java` file).
+      decompiledJava = runtimeLocations
+        .find(_.getUri().endsWith(".java"))
+        .get
+        .getUri()
+        .toAbsolutePath
+      decompiledRelative = decompiledJava.toRelative(workspace).toString
+      _ <- server.didOpen(decompiledRelative)
+      decompiledText = decompiledJava.readText
+      referenceQuery = importedTypeReferenceQuery(decompiledText)
+      withinLocations <- server.definitionSubstringQuery(
+        decompiledRelative,
+        referenceQuery,
+      )
+      _ = assert(
+        withinLocations.nonEmpty,
+        s"expected goto-definition inside the decompiled .java (query `$referenceQuery`) to resolve, got nothing",
+      )
     } yield ()
+  }
+
+  /**
+   * Builds a `definitionSubstringQuery` (a file substring with a `@@` cursor
+   * marker) pointing at the simple name of the first imported
+   * `com.google.protobuf` type in the given decompiled Java source.
+   */
+  private def importedTypeReferenceQuery(decompiledText: String): String = {
+    val importLine = decompiledText.linesIterator
+      .map(_.trim)
+      .find(line =>
+        line.startsWith("import com.google.protobuf.") && line.endsWith(";")
+      )
+      .getOrElse(
+        throw new AssertionError(
+          s"expected a com.google.protobuf import in the decompiled source:\n$decompiledText"
+        )
+      )
+    val fullyQualifiedName =
+      importLine.stripPrefix("import ").stripSuffix(";").trim
+    val lastDot = fullyQualifiedName.lastIndexOf('.')
+    val simpleName = fullyQualifiedName.substring(lastDot + 1)
+    val markerOffset = math.max(1, simpleName.length / 2)
+    val markedSimpleName =
+      simpleName.substring(0, markerOffset) + "@@" +
+        simpleName.substring(markerOffset)
+    s"import ${fullyQualifiedName.substring(0, lastDot + 1)}$markedSimpleName;"
   }
 
   // Same as above but with the outer-class layout (no java_multiple_files),

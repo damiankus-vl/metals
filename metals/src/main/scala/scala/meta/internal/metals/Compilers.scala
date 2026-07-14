@@ -1643,6 +1643,98 @@ class Compilers(
     }
   }
 
+  /**
+   * Decompiles the `.class` for a JVM library `symbol` (found at
+   * `classLocation` on the compiler classpath) and materializes it as a
+   * read-only Java file, returning a location that points at the line inside
+   * that file where the symbol is declared.
+   *
+   * Unlike [[locateInsideDecompiledJar]], which returns a `jar:...class`
+   * buffer that the editor treats as read-only bytecode, this returns an
+   * openable `.java` file so that goto-definition can continue from inside the
+   * decompiled source.
+   */
+  def decompiledJavaFileLocation(
+      symbol: String,
+      classLocation: l.Location,
+  ): Future[Option[l.Location]] = {
+    val classFileUri = classLocation.getUri()
+    if (!classFileUri.endsWith(".class")) Future.successful(None)
+    else {
+      val classFilePath = classFileUri.stripSuffix(".class").toAbsolutePath
+      val jarFileName =
+        classFilePath.jarPath.map(_.filename).getOrElse("unknown-classes.jar")
+      DecompileBytecode.cfr
+        .decompilePath(classFilePath, buildTargets.allWorkspaceJars.toList)
+        .map {
+          case Left(error) =>
+            scribe.error(s"Error decompiling $classFilePath: $error")
+            None
+          case Right(code) =>
+            javaFileCoordinates(symbol).flatMap {
+              case (javaPackagePath, className) =>
+                DecompiledJavaFiles
+                  .materialize(
+                    workspace,
+                    jarFileName,
+                    javaPackagePath,
+                    className,
+                    code,
+                  )
+                  .map { materialized =>
+                    new l.Location(
+                      materialized.toURI.toString,
+                      symbolRangeInDecompiled(symbol, materialized, code),
+                    )
+                  }
+            }
+        }
+    }
+  }
+
+  /**
+   * Derives the read-only Java file coordinates (package path with a trailing
+   * slash, and class file name) for a JVM `symbol`, mirroring the `.class`
+   * layout produced by [[classFileRelativePath]] (nested classes use
+   * `$`-separated names).
+   */
+  private def javaFileCoordinates(
+      symbol: String
+  ): Option[(String, String)] =
+    classFileRelativePath(symbol).map { relativeClassPath =>
+      val className =
+        relativeClassPath.getFileName.toString.stripSuffix(".class")
+      val javaPackagePath =
+        Option(relativeClassPath.getParent).fold("") { parent =>
+          parent.iterator().asScala.map(_.toString).mkString("", "/", "/")
+        }
+      (javaPackagePath, className)
+    }
+
+  /**
+   * Indexes the decompiled `code` with mtags to find where `symbol` is declared
+   * inside the materialized Java file, falling back to the start of the file
+   * when no matching definition occurrence is found.
+   */
+  private def symbolRangeInDecompiled(
+      symbol: String,
+      materialized: AbsolutePath,
+      code: String,
+  ): l.Range = {
+    val index = mtags().index(
+      Input.VirtualFile(materialized.toURI.toString, code),
+      m.dialects.Scala213,
+    )
+    index.occurrences
+      .find(occurrence =>
+        occurrence.role == s.SymbolOccurrence.Role.DEFINITION &&
+          occurrence.symbol == symbol
+      )
+      .flatMap(_.range)
+      .map(_.toLsp)
+      .getOrElse(new l.Range(new l.Position(0, 0), new l.Position(0, 0)))
+  }
+
   def signatureHelp(
       params: TextDocumentPositionParams,
       token: CancelToken,
@@ -1712,6 +1804,7 @@ class Compilers(
       val target = buildTargets
         .inverseSources(path)
         .orElse(protoGeneratedJavaTarget(path))
+        .orElse(decompiledJavaTarget(path))
 
       target match {
         case None =>
@@ -1764,6 +1857,20 @@ class Compilers(
         .protoPathFor(workspace, path)
         .flatMap(buildTargets.inverseSources)
     }
+  }
+
+  /**
+   * A Java file decompiled from a dependency jar belongs to no build target.
+   * The build target it was jumped from is normally recorded (and returned by
+   * `inverseSources`), but when the file is opened directly, fall back to any
+   * JVM build target so navigation inside it uses a presentation compiler with
+   * a real classpath instead of the bare fallback compiler.
+   */
+  private def decompiledJavaTarget(
+      path: AbsolutePath
+  ): Option[BuildTargetIdentifier] = {
+    if (!DecompiledJavaFiles.isDecompiledJavaFile(workspace, path)) None
+    else buildTargets.allJava.map(_.id).nextOption()
   }
 
   def loadWorksheetCompiler(
