@@ -184,6 +184,16 @@ case class MbtTarget(
       )
   }
 
+  /**
+   * The declared class output locations (jars or directories), resolved against
+   * the workspace. Unlike [[runClassDirectories]] this does not fall back to
+   * conventional directories, so it is empty when nothing was declared.
+   */
+  def resolvedClassDirectories(
+      workspace: AbsolutePath
+  ): Seq[AbsolutePath] =
+    classDirectories.distinct.map(resolveClassDir(workspace, _))
+
   private def resolveClassDir(
       workspace: AbsolutePath,
       raw: String,

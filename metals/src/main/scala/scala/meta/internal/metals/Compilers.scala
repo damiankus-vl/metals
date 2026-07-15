@@ -1597,7 +1597,10 @@ class Compilers(
     new ClassHierarchyTargetProvider(
       () =>
         buildTargets.allWorkspaceJars ++
-          fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_)),
+          fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_)) ++
+          // Compiled workspace output, so navigation can reach members that
+          // exist only after compilation (e.g. Lombok-generated accessors).
+          fallbackClasspaths.classDirectories().map(AbsolutePath(_)),
       mbtWorkspaceSymbolProvider.protoJavaOutlineFor(_),
     )
 

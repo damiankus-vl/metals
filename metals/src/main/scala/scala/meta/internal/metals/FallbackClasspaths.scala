@@ -18,6 +18,13 @@ import ch.epfl.scala.bsp4j.MavenDependencyModule
 trait BaseFallbackClasspaths {
   def javaCompilerClasspath(): Seq[Path]
   def scalaCompilerClasspath(): Seq[Path]
+
+  /**
+   * Compiled workspace output (jars or directories) declared by the build. Not
+   * part of the compiler classpaths — a compiler must not see its own output —
+   * but useful for read-only navigation into compiled-only members.
+   */
+  def classDirectories(): Seq[Path] = Nil
 }
 object EmptyFallbackClasspaths extends BaseFallbackClasspaths {
   override def javaCompilerClasspath(): Seq[Path] = Nil
@@ -131,6 +138,11 @@ class FallbackClasspaths(
     val build = mbtBuild()
     build.getDependencyModules.asScala.iterator.flatMap(_.jarPath).toSeq
   }
+
+  override def classDirectories(): Seq[Path] =
+    if (fallbackClasspathsConfig().isMbt)
+      mbtBuild().allClassDirectories(workspace).map(_.toNIO)
+    else Nil
 
   private def guessClasspath(): Seq[Path] = {
     if (!fallbackClasspathsConfig().isGuessed) {

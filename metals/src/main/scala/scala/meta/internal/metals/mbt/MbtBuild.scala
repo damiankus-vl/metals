@@ -39,6 +39,15 @@ case class MbtBuild(
       Option(this.namespaces).forall(_.isEmpty) &&
       Option(this.uncheckedSources).forall(_.isEmpty)
 
+  /**
+   * Every declared class output location (compiled jars or directories) across
+   * all targets, resolved against the workspace. Used to make compiled output
+   * navigable — it contains members that source-only tools can't see, such as
+   * annotation-processor-generated methods (Lombok, AutoValue, ...).
+   */
+  def allClassDirectories(workspace: AbsolutePath): Seq[AbsolutePath] =
+    mbtTargets.flatMap(_.resolvedClassDirectories(workspace)).distinct
+
   def asBspModules: bsp4j.DependencyModulesResult =
     new bsp4j.DependencyModulesResult(
       mbtTargets
