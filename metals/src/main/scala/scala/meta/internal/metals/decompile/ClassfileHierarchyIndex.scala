@@ -15,21 +15,22 @@ import org.eclipse.{lsp4j => l}
 import org.objectweb.asm.ClassReader
 
 /**
- * Locates `.class` files for JVM symbols across a set of classpath jars and
+ * Locates `.class` files for JVM symbols across a set of classpath entries and
  * walks their compiled type hierarchy via ASM, without decompiling anything.
  * Backs navigation to a member inherited from a compiled class: the caller
  * supplies the classes to start from (`hierarchyMemberTargets`) and gets back
- * every declaring class, each possibly living in a different jar.
+ * every declaring class, each possibly living in a different entry.
  *
- * `classpathJars` is a supplier rather than a fixed collection because the
- * workspace classpath can change (e.g. after an import), so it is re-read on
- * every call.
+ * Entries may be jars (dependency jars, Bazel `lib*.jar` outputs) or class
+ * directories (Maven `target/classes`, Gradle `build/classes`). It is a
+ * supplier rather than a fixed collection because the workspace classpath can
+ * change (e.g. after an import), so it is re-read on every call.
  */
 final class ClassfileHierarchyIndex(
-    classpathJars: () => Iterator[AbsolutePath]
+    classpathEntries: () => Iterator[AbsolutePath]
 ) {
 
-  /** The `.class` location for a type symbol, from the first classpath jar that has it. */
+  /** The `.class` location for a type symbol, from the first entry that has it. */
   def classFileLocation(classSymbol: String): Option[l.Location] = {
     val result =
       readClassFile(classSymbol).map { case (uri, _) => classLocation(uri) }
@@ -37,31 +38,51 @@ final class ClassfileHierarchyIndex(
   }
 
   /**
-   * Raw bytes and the jar-fs `.class` URI from the first classpath jar that
-   * contains the class denoted by `classSymbol`.
+   * Raw bytes and the `.class` URI from the first classpath entry (jar or class
+   * directory) that contains the class denoted by `classSymbol`.
    */
   def readClassFile(classSymbol: String): Option[(String, Array[Byte])] = {
     val result =
       classFileRelativePath(classSymbol).flatMap { relativeClassPath =>
-        classpathJars()
-          .filter(jar => jar.filename.endsWith(".jar") && jar.exists)
-          .flatMap { jar =>
-            try {
-              FileIO.withJarFileSystem(jar, create = false) { root =>
-                val classFile = root.resolveZipPath(relativeClassPath)
-                Option.when(classFile.exists)(
-                  classFile.toURI.toString -> Files.readAllBytes(
-                    classFile.toNIO
-                  )
-                )
-              }
-            } catch {
-              case NonFatal(_) => None
-            }
-          }
+        classpathEntries()
+          .filter(_.exists)
+          .flatMap(entry => readFromEntry(entry, relativeClassPath))
           .nextOption()
       }
     result
+  }
+
+  private def readFromEntry(
+      entry: AbsolutePath,
+      relativeClassPath: Path,
+  ): Option[(String, Array[Byte])] =
+    if (entry.filename.endsWith(".jar")) readFromJar(entry, relativeClassPath)
+    else if (entry.isDirectory) readFromDirectory(entry, relativeClassPath)
+    else None
+
+  private def readFromJar(
+      jar: AbsolutePath,
+      relativeClassPath: Path,
+  ): Option[(String, Array[Byte])] =
+    try {
+      FileIO.withJarFileSystem(jar, create = false) { root =>
+        val classFile = root.resolveZipPath(relativeClassPath)
+        Option.when(classFile.exists)(
+          classFile.toURI.toString -> Files.readAllBytes(classFile.toNIO)
+        )
+      }
+    } catch {
+      case NonFatal(_) => None
+    }
+
+  private def readFromDirectory(
+      dir: AbsolutePath,
+      relativeClassPath: Path,
+  ): Option[(String, Array[Byte])] = {
+    val classFile = dir.toNIO.resolve(relativeClassPath)
+    Option.when(Files.exists(classFile))(
+      classFile.toUri.toString -> Files.readAllBytes(classFile)
+    )
   }
 
   /**

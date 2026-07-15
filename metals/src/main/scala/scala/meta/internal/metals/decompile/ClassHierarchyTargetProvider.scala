@@ -37,19 +37,20 @@ private object SymbolNavigation {
  * its declaring class. Nothing is decompiled here; opening a returned `.class`
  * triggers Metals' existing consent-gated decompilation.
  *
- * @param classpathJars
- *   jars to search, re-read on every call since the classpath can change.
+ * @param classpathEntries
+ *   jars and class directories to search, re-read on every call since the
+ *   workspace classpath can change.
  * @param protoJavaOutlineFor
  *   the synthesized proto outline declaring a class; its supertypes seed the
  *   walk when the owner isn't on the classpath.
  */
 final class ClassHierarchyTargetProvider(
-    classpathJars: () => Iterator[AbsolutePath],
+    classpathEntries: () => Iterator[AbsolutePath],
     protoJavaOutlineFor: String => Option[VirtualTextDocument],
 )(implicit ec: ExecutionContext) {
 
   private val classfileHierarchyIndex =
-    new ClassfileHierarchyIndex(classpathJars)
+    new ClassfileHierarchyIndex(classpathEntries)
 
   /**
    * Definition targets for `symbol`, each pairing a `.class` location with the
