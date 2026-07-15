@@ -30,31 +30,39 @@ final class ClassfileHierarchyIndex(
 ) {
 
   /** The `.class` location for a type symbol, from the first classpath jar that has it. */
-  def classFileLocation(classSymbol: String): Option[l.Location] =
-    readClassFile(classSymbol).map { case (uri, _) => classLocation(uri) }
+  def classFileLocation(classSymbol: String): Option[l.Location] = {
+    val result =
+      readClassFile(classSymbol).map { case (uri, _) => classLocation(uri) }
+    result
+  }
 
   /**
    * Raw bytes and the jar-fs `.class` URI from the first classpath jar that
    * contains the class denoted by `classSymbol`.
    */
-  def readClassFile(classSymbol: String): Option[(String, Array[Byte])] =
-    classFileRelativePath(classSymbol).flatMap { relativeClassPath =>
-      classpathJars()
-        .filter(jar => jar.filename.endsWith(".jar") && jar.exists)
-        .flatMap { jar =>
-          try {
-            FileIO.withJarFileSystem(jar, create = false) { root =>
-              val classFile = root.resolveZipPath(relativeClassPath)
-              Option.when(classFile.exists)(
-                classFile.toURI.toString -> Files.readAllBytes(classFile.toNIO)
-              )
+  def readClassFile(classSymbol: String): Option[(String, Array[Byte])] = {
+    val result =
+      classFileRelativePath(classSymbol).flatMap { relativeClassPath =>
+        classpathJars()
+          .filter(jar => jar.filename.endsWith(".jar") && jar.exists)
+          .flatMap { jar =>
+            try {
+              FileIO.withJarFileSystem(jar, create = false) { root =>
+                val classFile = root.resolveZipPath(relativeClassPath)
+                Option.when(classFile.exists)(
+                  classFile.toURI.toString -> Files.readAllBytes(
+                    classFile.toNIO
+                  )
+                )
+              }
+            } catch {
+              case NonFatal(_) => None
             }
-          } catch {
-            case NonFatal(_) => None
           }
-        }
-        .nextOption()
-    }
+          .nextOption()
+      }
+    result
+  }
 
   /**
    * Walks the type hierarchy from `seeds` upward via bytecode, returning a
@@ -88,25 +96,40 @@ final class ClassfileHierarchyIndex(
         }
       }
     }
-    targets.toList.distinctBy(target => (target._1, target._2.getUri()))
+    val result =
+      targets.toList.distinctBy(target => (target._1, target._2.getUri()))
+    result
   }
 
-  private def readClass(classSymbol: String): Option[(String, ClassfileInfo)] =
-    readClassFile(classSymbol).map { case (uri, bytes) =>
-      val visitor = new ClassfileInfoVisitor
-      new ClassReader(bytes).accept(
-        visitor,
-        ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES,
-      )
-      uri -> visitor.result
-    }
+  private def readClass(
+      classSymbol: String
+  ): Option[(String, ClassfileInfo)] = {
+    val result =
+      readClassFile(classSymbol).map { case (uri, bytes) =>
+        val visitor = new ClassfileInfoVisitor
+        new ClassReader(bytes).accept(
+          visitor,
+          ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES,
+        )
+        uri -> visitor.result
+      }
+    result
+  }
 
-  private def classLocation(uri: String): l.Location =
-    new l.Location(uri, new l.Range(new l.Position(0, 0), new l.Position(0, 0)))
+  private def classLocation(uri: String): l.Location = {
+    val result =
+      new l.Location(
+        uri,
+        new l.Range(new l.Position(0, 0), new l.Position(0, 0)),
+      )
+    result
+  }
 
   /** `com/example/Outer$Inner` becomes `com/example/Outer#Inner#`. */
-  private def internalNameToSymbol(internalName: String): String =
-    internalName.replace('$', '#') + "#"
+  private def internalNameToSymbol(internalName: String): String = {
+    val result = internalName.replace('$', '#') + "#"
+    result
+  }
 
   /**
    * Converts a SemanticDB type symbol into its `.class` entry path, mapping
@@ -115,18 +138,20 @@ final class ClassfileHierarchyIndex(
    */
   private def classFileRelativePath(symbol: String): Option[Path] = {
     val trimmed = symbol.stripSuffix("#").stripSuffix(".")
-    if (trimmed.isEmpty || trimmed.endsWith("/")) None
-    else {
-      val lastSlash = trimmed.lastIndexOf('/')
-      val (packagePrefix, className) =
-        if (lastSlash < 0) ("", trimmed)
-        else
-          (
-            trimmed.substring(0, lastSlash + 1),
-            trimmed.substring(lastSlash + 1),
-          )
-      val binaryName = className.replace('#', '$').replace('.', '$')
-      Some(Paths.get(s"$packagePrefix$binaryName.class"))
-    }
+    val result =
+      if (trimmed.isEmpty || trimmed.endsWith("/")) None
+      else {
+        val lastSlash = trimmed.lastIndexOf('/')
+        val (packagePrefix, className) =
+          if (lastSlash < 0) ("", trimmed)
+          else
+            (
+              trimmed.substring(0, lastSlash + 1),
+              trimmed.substring(lastSlash + 1),
+            )
+        val binaryName = className.replace('#', '$').replace('.', '$')
+        Some(Paths.get(s"$packagePrefix$binaryName.class"))
+      }
+    result
   }
 }

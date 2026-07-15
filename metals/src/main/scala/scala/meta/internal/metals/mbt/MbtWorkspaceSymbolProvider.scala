@@ -140,17 +140,25 @@ class MbtWorkspaceSymbolProvider(
     documents.get(file).toSeq.flatMap(protobufWorkspace.allJavaOutlines)
 
   /**
-   * The synthesized Java outline declaring the top-level class `classSymbol`
-   * (a SemanticDB symbol such as `com/example/jproto/WorkerProtocol#`), if any.
-   * Used to recover the declared supertypes of a proto-generated class the
-   * presentation compiler can't see, so navigation can follow inherited members
-   * into their compiled base classes.
+   * The synthesized Java outline that declares `classSymbol`, if any (a
+   * SemanticDB symbol such as `com/example/jproto/WorkerProtocol#` or a nested
+   * message like `com/example/jproto/WorkerProtocol#WorkResponse#`). Used to
+   * recover the declared supertypes of a proto-generated class the presentation
+   * compiler can't see, so navigation can follow inherited members into their
+   * compiled base classes.
+   *
+   * An outline records only its outer class in `toplevelSymbols`, so a nested
+   * message is matched by that outer class being a prefix of its symbol (the
+   * outer symbol ends in `#`, so the prefix check is exact at the nesting
+   * boundary).
    */
   def protoJavaOutlineFor(classSymbol: String): Option[VirtualTextDocument] =
     documents.keysIterator
       .filter(_.isProtoFilename)
       .flatMap(protoJavaOutlines)
-      .find(_.toplevelSymbols().contains(classSymbol))
+      .find(
+        _.toplevelSymbols().asScala.exists(top => classSymbol.startsWith(top))
+      )
   private val turbineCompiler: TurbineCompiler[AbsolutePath] =
     new TurbineCompiler[AbsolutePath](
       () => documentsKeys,
