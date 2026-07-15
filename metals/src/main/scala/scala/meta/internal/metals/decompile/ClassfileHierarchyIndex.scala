@@ -122,6 +122,27 @@ final class ClassfileHierarchyIndex(
     result
   }
 
+  /**
+   * The 1-based source line of the method `memberName` on `classSymbol`, read
+   * from its bytecode `LineNumberTable`. Used to jump to real source for a
+   * method that exists only in compiled output (e.g. a Lombok accessor), where
+   * the line points back at the annotated field. `None` when the class isn't
+   * found or carries no debug line information.
+   */
+  def memberSourceLine(
+      classSymbol: String,
+      memberName: String,
+  ): Option[Int] = {
+    val result =
+      readClassFile(classSymbol).flatMap { case (_, bytes) =>
+        val visitor = new ClassfileMemberLineVisitor(memberName)
+        // No SKIP_CODE: line numbers live in the Code attribute.
+        new ClassReader(bytes).accept(visitor, ClassReader.SKIP_FRAMES)
+        visitor.line
+      }
+    result
+  }
+
   private def readClass(
       classSymbol: String
   ): Option[(String, ClassfileInfo)] = {

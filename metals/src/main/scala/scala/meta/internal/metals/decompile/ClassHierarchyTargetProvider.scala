@@ -43,10 +43,16 @@ private object SymbolNavigation {
  * @param protoJavaOutlineFor
  *   the synthesized proto outline declaring a class; its supertypes seed the
  *   walk when the owner isn't on the classpath.
+ * @param classSourceFile
+ *   the workspace source file declaring a class, if it has one. When a member's
+ *   declaring class is workspace source, the target points at that source at
+ *   the member's bytecode line (so a compiled-only member like a Lombok
+ *   accessor lands on the annotated field) instead of at the `.class`.
  */
 final class ClassHierarchyTargetProvider(
     classpathEntries: () => Iterator[AbsolutePath],
     protoJavaOutlineFor: String => Option[VirtualTextDocument],
+    classSourceFile: String => Option[AbsolutePath],
 )(implicit ec: ExecutionContext) {
 
   private val classfileHierarchyIndex =
@@ -70,6 +76,13 @@ final class ClassHierarchyTargetProvider(
       case Some(SymbolNavigation.AsMember(ownerSymbol, memberName)) =>
         val members = classfileHierarchyIndex
           .hierarchyMemberTargets(seedClasses(ownerSymbol), memberName)
+          .map { case (memberSymbol, classLocation) =>
+            memberSymbol -> preferSource(
+              memberSymbol,
+              memberName,
+              classLocation,
+            )
+          }
         // A type-owned symbol is usually a member, but the same shape also
         // describes a nested type the PC reported as `Owner#Nested#`. Only when
         // no class in the hierarchy declares the member do we fall back to
@@ -79,6 +92,34 @@ final class ClassHierarchyTargetProvider(
       case None => Nil
     }
     result
+  }
+
+  /**
+   * When the member's declaring class is workspace source, a location in that
+   * source at the member's bytecode line; otherwise the compiled `.class`
+   * location (to be decompiled by the caller).
+   */
+  private def preferSource(
+      memberSymbol: String,
+      memberName: String,
+      classLocation: l.Location,
+  ): l.Location = {
+    val declaringClass = Symbol(memberSymbol).owner.value
+    val sourceLocation =
+      for {
+        source <- classSourceFile(declaringClass)
+        line <- classfileHierarchyIndex.memberSourceLine(
+          declaringClass,
+          memberName,
+        )
+      } yield new l.Location(source.toURI.toString, lineRange(line))
+    sourceLocation.getOrElse(classLocation)
+  }
+
+  /** An empty range at a 1-based bytecode line, converted to 0-based LSP. */
+  private def lineRange(oneBasedLine: Int): l.Range = {
+    val line = math.max(0, oneBasedLine - 1)
+    new l.Range(new l.Position(line, 0), new l.Position(line, 0))
   }
 
   private def typeTargets(classSymbol: String): Seq[(String, l.Location)] = {

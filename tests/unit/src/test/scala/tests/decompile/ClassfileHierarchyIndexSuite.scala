@@ -7,6 +7,7 @@ import scala.meta.internal.metals.decompile.ClassfileHierarchyIndex
 import scala.meta.io.AbsolutePath
 
 import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Label
 import org.objectweb.asm.Opcodes
 
 class ClassfileHierarchyIndexSuite extends munit.FunSuite {
@@ -16,6 +17,7 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
       internalName: String,
       superName: String,
       methodName: String,
+      sourceLine: Option[Int] = None,
   ): Unit = {
     val cw = new ClassWriter(0)
     cw.visit(
@@ -26,7 +28,16 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
       superName,
       null,
     )
-    cw.visitMethod(Opcodes.ACC_PUBLIC, methodName, "()V", null, null).visitEnd()
+    val mv = cw.visitMethod(Opcodes.ACC_PUBLIC, methodName, "()V", null, null)
+    sourceLine.foreach { line =>
+      mv.visitCode()
+      val label = new Label()
+      mv.visitLabel(label)
+      mv.visitLineNumber(line, label)
+      mv.visitInsn(Opcodes.RETURN)
+      mv.visitMaxs(0, 1)
+    }
+    mv.visitEnd()
     cw.visitEnd()
     val classFile = dir.resolve(s"$internalName.class")
     Files.createDirectories(classFile.getParent)
@@ -67,5 +78,23 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
     val targets =
       index.hierarchyMemberTargets(Seq("com/example/Child#"), "inherited")
     assertEquals(targets.map(_._1), List("com/example/Base#inherited()."))
+  }
+
+  test("reads-member-source-line-from-bytecode") {
+    val dir = Files.createTempDirectory("linedir")
+    writeClass(
+      dir,
+      "com/example/Bean",
+      "java/lang/Object",
+      "getName",
+      sourceLine = Some(42),
+    )
+    val index = new ClassfileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
+
+    assertEquals(
+      index.memberSourceLine("com/example/Bean#", "getName"),
+      Some(42),
+    )
+    assertEquals(index.memberSourceLine("com/example/Bean#", "absent"), None)
   }
 }

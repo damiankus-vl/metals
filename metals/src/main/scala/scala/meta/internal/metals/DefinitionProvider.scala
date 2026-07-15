@@ -224,9 +224,13 @@ final class DefinitionProvider(
             case true =>
               Future
                 .traverse(targets) { case (memberSymbol, location) =>
-                  compilers()
-                    .locateInsideDecompiledJar(memberSymbol, Seq(location))
-                    .map(_.headOption.getOrElse(location))
+                  // A `.class` target is decompiled to find the member line; a
+                  // target already pointing at workspace source is used as-is.
+                  if (location.getUri().endsWith(".class"))
+                    compilers()
+                      .locateInsideDecompiledJar(memberSymbol, Seq(location))
+                      .map(_.headOption.getOrElse(location))
+                  else Future.successful(location)
                 }
                 .map { located =>
                   val deduped = located.distinctBy(location =>

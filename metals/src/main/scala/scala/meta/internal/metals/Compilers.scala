@@ -1602,7 +1602,15 @@ class Compilers(
           // exist only after compilation (e.g. Lombok-generated accessors).
           fallbackClasspaths.classDirectories().map(AbsolutePath(_)),
       mbtWorkspaceSymbolProvider.protoJavaOutlineFor(_),
+      classSourceFileOf,
     )
+
+  /** The workspace source file declaring `classSymbol`, if it has one. */
+  private def classSourceFileOf(classSymbol: String): Option[AbsolutePath] =
+    mbtWorkspaceSymbolProvider
+      .definition(classSymbol)
+      .map(_.getUri().toAbsolutePath)
+      .find(source => source.exists && source.isScalaOrJava)
 
   def signatureHelp(
       params: TextDocumentPositionParams,
