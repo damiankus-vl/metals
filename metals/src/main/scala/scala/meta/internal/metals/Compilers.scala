@@ -126,6 +126,7 @@ class Compilers(
     featureFlags: FeatureFlagProvider,
     mbtBuild: () => MbtBuild,
     mbtWorkspaceSymbolProvider: MbtWorkspaceSymbolProvider,
+    decompilationConsent: DecompilationConsent,
 )(implicit ec: ExecutionContextExecutorService, rc: ReportContext)
     extends Cancelable {
 
@@ -1543,8 +1544,22 @@ class Compilers(
       locations: Seq[l.Location],
   ): Future[Seq[l.Location]] = {
     if (locations.isEmpty || !locations.head.getUri().endsWith(".class"))
-      return Future.successful(Nil)
+      Future.successful(Nil)
+    else
+      // Gate the actual decompilation (not merely locating a `.class`) behind
+      // the user's consent, so every caller — the standard definition path and
+      // the decompiled-classpath fallback alike — prompts at most once per
+      // session before reconstructing source from bytecode.
+      decompilationConsent.ensureConsent().flatMap {
+        case false => Future.successful(Nil)
+        case true => decompileAndLocate(symbol, locations)
+      }
+  }
 
+  private def decompileAndLocate(
+      symbol: String,
+      locations: Seq[l.Location],
+  ): Future[Seq[l.Location]] = {
     scribe.debug(s"locateInsideDecompiledJar: $symbol, $locations")
     val decoder = DecompileBytecode.cfr
     val uri = locations.head.getUri()
@@ -1580,7 +1595,6 @@ class Compilers(
             }.toSeq
       }
     }
-
   }
 
   /**

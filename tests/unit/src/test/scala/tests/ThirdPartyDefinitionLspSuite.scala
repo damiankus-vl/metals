@@ -2,8 +2,47 @@ package tests
 
 import scala.concurrent.Future
 
+import org.eclipse.lsp4j.MessageActionItem
+
 class ThirdPartyDefinitionLspSuite
     extends BaseRangesSuite("third-party-definition") {
+
+  test("declining-consent-yields-no-decompiled-definition") {
+    cleanWorkspace()
+    // Decline the decompilation prompt; returning a non-"Proceed" action rather
+    // than None, which would fall through to the test client's default grant.
+    client.showMessageRequestHandler = { params =>
+      Option.when(
+        params.getMessage().startsWith("Metals is about to decompile")
+      )(new MessageActionItem("Cancel"))
+    }
+    for {
+      _ <- initialize(
+        """|/metals.json
+           |{ "a": { "libraryDependencies": ["args4j:args4j:2.37"], "skipSources": true } }
+           |/a/src/main/scala/a/Main.scala
+           |package a
+           |import org.kohsuke.args4j.Starter
+           |object Main {
+           |  Starter.main(Array("--help"))
+           |}
+           |""".stripMargin
+      )
+      locations <- server.definition(
+        "a/src/main/scala/a/Main.scala",
+        """|package a
+           |import org.kohsuke.args4j.Sta@@rter
+           |object Main {
+           |  Starter.main(Array("--help"))
+           |}
+           |""".stripMargin,
+        workspace,
+      )
+    } yield assert(
+      locations.isEmpty,
+      s"Expected no definition when consent is declined, got: $locations",
+    )
+  }
 
   check(
     "definition-from-third-party-library",

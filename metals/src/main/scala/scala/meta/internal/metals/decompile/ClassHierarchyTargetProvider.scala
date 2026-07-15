@@ -136,7 +136,7 @@ final class ClassHierarchyTargetProvider(
   ): l.Range = {
     val lineIndex = math.max(0, oneBasedLine - 1)
     val lineText = sourceLine(source, lineIndex)
-    val candidates = memberName +: accessorFieldName(memberName).toSeq
+    val candidates = memberName +: accessorFieldNames(memberName)
     val identifier =
       candidates
         .flatMap(name => identifierColumn(lineText, name).map(name -> _))
@@ -180,8 +180,13 @@ final class ClassHierarchyTargetProvider(
     search(0)
   }
 
-  /** The JavaBean field name behind a `get`/`set`/`is` accessor, if any. */
-  private def accessorFieldName(memberName: String): Option[String] = {
+  /**
+   * Candidate field names behind a `get`/`set`/`is` accessor, most likely
+   * first: the JavaBean form (`getValue` -> `value`) and, for an all-caps field
+   * whose leading letter isn't lowercased by convention, the raw form
+   * (`getURL` -> `URL`).
+   */
+  private def accessorFieldNames(memberName: String): Seq[String] = {
     val stripped =
       if (memberName.startsWith("get") && memberName.length > 3)
         Some(memberName.substring(3))
@@ -190,9 +195,11 @@ final class ClassHierarchyTargetProvider(
       else if (memberName.startsWith("is") && memberName.length > 2)
         Some(memberName.substring(2))
       else None
-    stripped.map(name =>
-      if (name.isEmpty) name else name.head.toLower.toString + name.tail
-    )
+    stripped.toSeq.flatMap { name =>
+      val javaBean =
+        if (name.isEmpty) name else name.head.toLower.toString + name.tail
+      Seq(javaBean, name).distinct
+    }
   }
 
   private def typeTargets(classSymbol: String): Seq[(String, l.Location)] = {
@@ -282,17 +289,36 @@ final class ClassHierarchyTargetProvider(
               Seq(rest.indexOf(" extends "), rest.indexOf(" implements "))
                 .filter(_ >= 0)
             val end = if (stops.isEmpty) rest.length else stops.min
-            rest
-              .substring(0, end)
-              .split(',')
+            splitTopLevelCommas(rest.substring(0, end))
               .map(_.trim)
               .filter(_.nonEmpty)
-              .toSeq
           }
         }
         (listAfter("extends") ++ listAfter("implements")).map(fqnToClassSymbol)
       }
     result
+  }
+
+  /**
+   * Splits on commas that are not nested inside a generic type argument list, so
+   * `Foo<A, B>, Bar` yields `Foo<A, B>` and `Bar` rather than four fragments.
+   */
+  private def splitTopLevelCommas(text: String): Seq[String] = {
+    val parts = List.newBuilder[String]
+    val current = new StringBuilder
+    var depth = 0
+    for (c <- text) {
+      c match {
+        case '<' => depth += 1; current.append(c)
+        case '>' => if (depth > 0) depth -= 1; current.append(c)
+        case ',' if depth == 0 =>
+          parts += current.toString
+          current.clear()
+        case _ => current.append(c)
+      }
+    }
+    parts += current.toString
+    parts.result()
   }
 
   private def fqnToClassSymbol(fqn: String): String = {

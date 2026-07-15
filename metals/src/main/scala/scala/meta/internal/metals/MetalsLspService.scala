@@ -402,7 +402,6 @@ abstract class MetalsLspService(
     () => userConfig.definitionProviders,
     mbt2,
     () => userConfig.protobufLspConfig,
-    decompilationConsent,
   )
 
   val stacktraceAnalyzer: StacktraceAnalyzer = new StacktraceAnalyzer(
@@ -574,6 +573,7 @@ abstract class MetalsLspService(
       featureFlags,
       () => mbtBuild,
       mbt2,
+      decompilationConsent,
     )
   )
 

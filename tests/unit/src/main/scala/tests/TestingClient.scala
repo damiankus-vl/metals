@@ -463,6 +463,12 @@ class TestingClient(workspace: AbsolutePath, val buffers: Buffers)
               .exists(_.getTitle() == ChooseBuildServer.mbt.getTitle())
           ) {
             selectedServer
+          } else if (
+            params.getMessage().startsWith("Metals is about to decompile")
+          ) {
+            // Grant decompilation consent by default; suites that exercise the
+            // consent prompt itself override showMessageRequestHandler.
+            params.getActions().asScala.find(_.getTitle() == "Proceed").orNull
           } else if (ResetWorkspace.params() == params) {
             resetWorkspace
           } else if (OldBloopVersionRunning.params() == params) {

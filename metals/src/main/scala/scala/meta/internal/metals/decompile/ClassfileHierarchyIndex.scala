@@ -4,7 +4,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 
-import scala.collection.mutable
+import scala.annotation.tailrec
 import scala.util.control.NonFatal
 
 import scala.meta.internal.io.FileIO
@@ -94,31 +94,65 @@ final class ClassfileHierarchyIndex(
   def hierarchyMemberTargets(
       seeds: Seq[String],
       memberName: String,
-  ): Seq[(String, l.Location)] = {
-    val visited = mutable.Set.empty[String]
-    val queue = mutable.Queue.from(seeds)
-    val targets = mutable.ListBuffer.empty[(String, l.Location)]
-    while (queue.nonEmpty) {
-      val current = queue.dequeue()
-      if (visited.add(current)) {
-        readClass(current).foreach { case (uri, info) =>
-          val overloads = info.methods.count(_._1 == memberName)
-          if (overloads > 0)
-            (0 until overloads).foreach { index =>
-              val disambiguator = if (index == 0) "()." else s"(+$index)."
-              targets +=
-                (current + memberName + disambiguator) -> classLocation(uri)
-            }
-          else if (info.fields.contains(memberName))
-            targets += (current + memberName + ".") -> classLocation(uri)
-          (info.superName ++ info.interfaces).foreach(internalName =>
-            queue.enqueue(internalNameToSymbol(internalName))
-          )
+  ): Seq[(String, l.Location)] =
+    walk(seeds.toList, memberName, Set.empty, Nil)
+      .distinctBy { case (symbol, location) => (symbol, location.getUri()) }
+
+  /**
+   * Breadth-first traversal of the type hierarchy: for each class in `frontier`
+   * record the targets it declares for `memberName`, then continue into its
+   * supertypes. `visited` prevents revisiting a class reachable by multiple
+   * paths; `acc` collects targets in reverse discovery order.
+   */
+  @tailrec
+  private def walk(
+      frontier: List[String],
+      memberName: String,
+      visited: Set[String],
+      acc: List[(String, l.Location)],
+  ): List[(String, l.Location)] =
+    frontier match {
+      case Nil => acc.reverse
+      case current :: rest if visited(current) =>
+        walk(rest, memberName, visited, acc)
+      case current :: rest =>
+        readClass(current) match {
+          case None => walk(rest, memberName, visited + current, acc)
+          case Some((uri, info)) =>
+            val found = memberTargets(current, memberName, uri, info)
+            val supertypes =
+              (info.superName ++ info.interfaces).map(internalNameToSymbol)
+            walk(
+              rest ++ supertypes,
+              memberName,
+              visited + current,
+              found reverse_::: acc,
+            )
         }
-      }
     }
-    val result =
-      targets.toList.distinctBy(target => (target._1, target._2.getUri()))
+
+  /**
+   * The navigation targets contributed by a single class: one per overload of a
+   * method named `memberName`, or one for a field of that name. Empty when the
+   * class declares no such member.
+   */
+  private def memberTargets(
+      classSymbol: String,
+      memberName: String,
+      uri: String,
+      info: ClassfileInfo,
+  ): List[(String, l.Location)] = {
+    val overloads = info.methods.count { case (name, _) => name == memberName }
+    val result = if (overloads > 0) {
+      (0 until overloads).map { index =>
+        val disambiguator = if (index == 0) "()." else s"(+$index)."
+        (classSymbol + memberName + disambiguator) -> classLocation(uri)
+      }.toList
+    } else if (info.fields.contains(memberName)) {
+      List((classSymbol + memberName + ".") -> classLocation(uri))
+    } else {
+      Nil
+    }
     result
   }
 

@@ -69,7 +69,6 @@ final class DefinitionProvider(
     definitionProviders: () => DefinitionProviderConfig,
     mbt: MbtWorkspaceSymbolProvider,
     protobufLspConfig: () => ProtobufLspConfig,
-    decompilationConsent: DecompilationConsent,
 )(implicit ec: ExecutionContext, rc: ReportContext) {
 
   private val fallback = new FallbackDefinitionProvider(trees, index)
@@ -202,10 +201,11 @@ final class DefinitionProvider(
    * else resolved, so it is purely additive.
    *
    * For an inherited or multiply-overridden member every declaring class in the
-   * type hierarchy is offered (the client shows a picker). Decompiling to find
-   * the exact line requires the user's consent (the same consent that gates
-   * showing the decompiled contents); if consent isn't granted we leave the
-   * definition empty.
+   * type hierarchy is offered (the client shows a picker). A `.class` target is
+   * decompiled — behind the user's consent, gated in
+   * [[Compilers.locateInsideDecompiledJar]] — to find the exact line; a target
+   * that already points at workspace source needs no consent. A `.class` target
+   * is dropped when consent is declined or decompilation fails.
    */
   private def fallbackToDecompiledClasspath(
       path: AbsolutePath,
@@ -219,35 +219,31 @@ final class DefinitionProvider(
       compilers().classHierarchyTargets(result.symbol).flatMap { targets =>
         if (targets.isEmpty) Future.successful(result)
         else
-          decompilationConsent.ensureConsent().flatMap {
-            case false => Future.successful(result)
-            case true =>
-              Future
-                .traverse(targets) { case (memberSymbol, location) =>
-                  // A `.class` target is decompiled to find the member line; a
-                  // target already pointing at workspace source is used as-is.
-                  if (location.getUri().endsWith(".class"))
-                    compilers()
-                      .locateInsideDecompiledJar(memberSymbol, Seq(location))
-                      .map(_.headOption.getOrElse(location))
-                  else Future.successful(location)
-                }
-                .map { located =>
-                  val deduped = located.distinctBy(location =>
-                    (
-                      location.getUri(),
-                      location.getRange().getStart().getLine(),
-                    )
-                  )
-                  DefinitionResult(
-                    deduped.asJava,
-                    result.symbol,
-                    None,
-                    None,
-                    result.querySymbol,
-                  )
-                }
-          }
+          Future
+            .traverse(targets) { case (memberSymbol, location) =>
+              if (location.getUri().endsWith(".class"))
+                compilers()
+                  .locateInsideDecompiledJar(memberSymbol, Seq(location))
+                  .map(_.headOption)
+              else Future.successful(Some(location))
+            }
+            .map { located =>
+              val deduped = located.flatten.distinctBy(location =>
+                (
+                  location.getUri(),
+                  location.getRange().getStart().getLine(),
+                )
+              )
+              if (deduped.isEmpty) result
+              else
+                DefinitionResult(
+                  deduped.asJava,
+                  result.symbol,
+                  None,
+                  None,
+                  result.querySymbol,
+                )
+            }
       }
     } else Future.successful(result)
   }

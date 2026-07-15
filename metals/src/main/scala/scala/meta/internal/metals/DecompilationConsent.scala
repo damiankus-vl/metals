@@ -31,6 +31,11 @@ class DecompilationConsent(
 
   private val consentedThisSession = new AtomicBoolean(false)
 
+  // Shared while a prompt is on screen so concurrent decompile attempts (e.g.
+  // several `.class` targets resolved in parallel) reuse one prompt instead of
+  // each opening their own. Guarded by `this`; cleared once the user answers.
+  private var pending: Option[Future[Boolean]] = None
+
   private def isGranted: Boolean =
     consentedThisSession.get() ||
       tables.dismissedNotifications.DecompilationConsent.isDismissed
@@ -38,31 +43,41 @@ class DecompilationConsent(
   /** Whether decompilation may proceed, prompting the user if not yet decided. */
   def ensureConsent(): Future[Boolean] = {
     if (isGranted) Future.successful(true)
-    else {
-      val proceed = new MessageActionItem("Proceed")
-      val alwaysInWorkspace =
-        new MessageActionItem("Always allow in this workspace")
-      val params = new ShowMessageRequestParams()
-      params.setType(MessageType.Warning)
-      params.setMessage(
-        "Metals is about to decompile a compiled .class file into readable " +
-          "source. Decompiled output is derived from the library's bytecode " +
-          "and may be subject to its license terms. Only proceed if you are " +
-          "permitted to view this library's source (for example it is open " +
-          "source, or you hold a license granting that right). Metals cannot " +
-          "verify your eligibility."
-      )
-      params.setActions(List(proceed, alwaysInWorkspace).asJava)
-      languageClient.showMessageRequest(params).asScala.map { item =>
-        if (item == alwaysInWorkspace) {
-          tables.dismissedNotifications.DecompilationConsent.dismissForever()
-          consentedThisSession.set(true)
-          true
-        } else if (item == proceed) {
-          consentedThisSession.set(true)
-          true
-        } else false
+    else
+      synchronized {
+        pending.getOrElse {
+          val prompt = requestConsent()
+          pending = Some(prompt)
+          prompt.onComplete(_ => synchronized { pending = None })
+          prompt
+        }
       }
+  }
+
+  private def requestConsent(): Future[Boolean] = {
+    val proceed = new MessageActionItem("Proceed")
+    val alwaysInWorkspace =
+      new MessageActionItem("Always allow in this workspace")
+    val params = new ShowMessageRequestParams()
+    params.setType(MessageType.Warning)
+    params.setMessage(
+      "Metals is about to decompile a compiled .class file into readable " +
+        "source. Decompiled output is derived from the library's bytecode " +
+        "and may be subject to its license terms. Only proceed if you are " +
+        "permitted to view this library's source (for example it is open " +
+        "source, or you hold a license granting that right). Metals cannot " +
+        "verify your eligibility."
+    )
+    params.setActions(List(proceed, alwaysInWorkspace).asJava)
+    languageClient.showMessageRequest(params).asScala.map { item =>
+      if (item == alwaysInWorkspace) {
+        tables.dismissedNotifications.DecompilationConsent.dismissForever()
+        consentedThisSession.set(true)
+        true
+      } else if (item == proceed) {
+        consentedThisSession.set(true)
+        true
+      } else false
     }
   }
 }
