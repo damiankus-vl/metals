@@ -133,7 +133,7 @@ class BazelMbtLspSuite
        |      ],
        |      "scalaVersion": "2.13.16",
        |      "dependsOn": [],
-       |      "classDirectories": []
+       |      "classDirectories": ["<classDirectories-path>"]
        |    }
        |  },
        |  "uncheckedSources": []
@@ -421,7 +421,7 @@ class BazelMbtLspSuite
             |      ],
             |      "scalaVersion": "2.13.14",
             |      "dependsOn": [],
-            |      "classDirectories": []
+            |      "classDirectories": ["<classDirectories-path>"]
             |    },
             |    "//core_b": {
             |      "sources": [
@@ -436,7 +436,7 @@ class BazelMbtLspSuite
             |      ],
             |      "scalaVersion": "2.13.14",
             |      "dependsOn": [],
-            |      "classDirectories": []
+            |      "classDirectories": ["<classDirectories-path>"]
             |    }
             |  },
             |  "uncheckedSources": []
@@ -497,7 +497,7 @@ class BazelMbtLspSuite
             |      ],
             |      "scalaVersion": "2.13.16",
             |      "dependsOn": [],
-            |      "classDirectories": []
+            |      "classDirectories": ["<classDirectories-path>"]
             |    },
             |    "//app": {
             |      "sources": [
@@ -601,7 +601,7 @@ class BazelMbtLspSuite
             |      "dependencyModules": [],
             |      "scalaVersion": "2.13.18",
             |      "dependsOn": [],
-            |      "classDirectories": []
+            |      "classDirectories": ["<classDirectories-path>"]
             |    }
             |  },
             |  "uncheckedSources": []
@@ -721,7 +721,7 @@ class BazelMbtLspSuite
             |      ],
             |      "scalaVersion": "2.13.18",
             |      "dependsOn": [],
-            |      "classDirectories": []
+            |      "classDirectories": ["<classDirectories-path>"]
             |    },
             |    "//app": {
             |      "sources": [
@@ -880,7 +880,7 @@ class BazelMbtLspSuite
             |      "dependsOn": [
             |        "//third_party"
             |      ],
-            |      "classDirectories": []
+            |      "classDirectories": ["<classDirectories-path>"]
             |    }
             |  },
             |  "uncheckedSources": []
