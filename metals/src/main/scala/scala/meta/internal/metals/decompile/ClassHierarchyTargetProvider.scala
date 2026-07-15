@@ -3,6 +3,7 @@ package scala.meta.internal.metals.decompile
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 
+import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.mbt.VirtualTextDocument
 import scala.meta.internal.mtags.Symbol
 import scala.meta.io.AbsolutePath
@@ -112,14 +113,86 @@ final class ClassHierarchyTargetProvider(
           declaringClass,
           memberName,
         )
-      } yield new l.Location(source.toURI.toString, lineRange(line))
+      } yield new l.Location(
+        source.toURI.toString,
+        memberRange(source, line, memberName),
+      )
     sourceLocation.getOrElse(classLocation)
   }
 
-  /** An empty range at a 1-based bytecode line, converted to 0-based LSP. */
-  private def lineRange(oneBasedLine: Int): l.Range = {
-    val line = math.max(0, oneBasedLine - 1)
-    new l.Range(new l.Position(line, 0), new l.Position(line, 0))
+  /**
+   * A range over the member's identifier on `oneBasedLine`, so navigation lands
+   * on the name (matching a full Java language server, which lets the editor
+   * collapse the two into one result) rather than selecting the whole line. A
+   * compiled-only accessor (e.g. a Lombok `@Getter`) has no body, so its
+   * bytecode line points at the annotated field; the field name derived from
+   * the accessor is therefore tried too. Falls back to the line start when no
+   * identifier is found.
+   */
+  private def memberRange(
+      source: AbsolutePath,
+      oneBasedLine: Int,
+      memberName: String,
+  ): l.Range = {
+    val lineIndex = math.max(0, oneBasedLine - 1)
+    val lineText = sourceLine(source, lineIndex)
+    val candidates = memberName +: accessorFieldName(memberName).toSeq
+    val identifier =
+      candidates
+        .flatMap(name => identifierColumn(lineText, name).map(name -> _))
+        .headOption
+    identifier match {
+      case Some((name, column)) =>
+        new l.Range(
+          new l.Position(lineIndex, column),
+          new l.Position(lineIndex, column + name.length),
+        )
+      case None =>
+        new l.Range(new l.Position(lineIndex, 0), new l.Position(lineIndex, 0))
+    }
+  }
+
+  private def sourceLine(source: AbsolutePath, lineIndex: Int): String = {
+    val lines = source.readTextOpt.map(_.split("\n", -1)).getOrElse(Array.empty)
+    if (lineIndex >= 0 && lineIndex < lines.length) lines(lineIndex) else ""
+  }
+
+  /**
+   * The column of `name` used as a whole identifier in `lineText` (not a
+   * substring of a longer name), or `None` if it doesn't appear.
+   */
+  private def identifierColumn(lineText: String, name: String): Option[Int] = {
+    def isIdentifierChar(c: Char): Boolean =
+      c.isLetterOrDigit || c == '_' || c == '$'
+    def search(from: Int): Option[Int] = {
+      val index = lineText.indexOf(name, from)
+      if (index < 0 || name.isEmpty) None
+      else {
+        val beforeOk =
+          index == 0 || !isIdentifierChar(lineText.charAt(index - 1))
+        val after = index + name.length
+        val afterOk =
+          after >= lineText.length || !isIdentifierChar(lineText.charAt(after))
+        if (beforeOk && afterOk) Some(index)
+        else search(index + 1)
+      }
+    }
+    search(0)
+  }
+
+  /** The JavaBean field name behind a `get`/`set`/`is` accessor, if any. */
+  private def accessorFieldName(memberName: String): Option[String] = {
+    val stripped =
+      if (memberName.startsWith("get") && memberName.length > 3)
+        Some(memberName.substring(3))
+      else if (memberName.startsWith("set") && memberName.length > 3)
+        Some(memberName.substring(3))
+      else if (memberName.startsWith("is") && memberName.length > 2)
+        Some(memberName.substring(2))
+      else None
+    stripped.map(name =>
+      if (name.isEmpty) name else name.head.toLower.toString + name.tail
+    )
   }
 
   private def typeTargets(classSymbol: String): Seq[(String, l.Location)] = {
