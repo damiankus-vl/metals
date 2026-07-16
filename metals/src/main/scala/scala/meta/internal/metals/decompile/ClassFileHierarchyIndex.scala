@@ -18,7 +18,7 @@ import org.objectweb.asm.ClassReader
  * Locates `.class` files for JVM symbols across a set of classpath entries and
  * walks their compiled type hierarchy via ASM, without decompiling anything.
  * Backs navigation to a member inherited from a compiled class: the caller
- * supplies the classes to start from (`hierarchyMemberTargets`) and gets back
+ * supplies the classes to start from (`navigationTargets`) and gets back
  * every declaring class, each possibly living in a different entry.
  *
  * Entries may be jars (dependency jars, Bazel `lib*.jar` outputs) or class
@@ -26,7 +26,7 @@ import org.objectweb.asm.ClassReader
  * supplier rather than a fixed collection because the workspace classpath can
  * change (e.g. after an import), so it is re-read on every call.
  */
-final class ClassfileHierarchyIndex(
+final class ClassFileHierarchyIndex(
     classpathEntries: () => Iterator[AbsolutePath]
 ) {
 
@@ -39,7 +39,7 @@ final class ClassfileHierarchyIndex(
 
   /**
    * Raw bytes and the `.class` URI from the first classpath entry (jar or class
-   * directory) that contains the class denoted by `classSymbol`.
+   * directory) that contains the class denoted by `typeSymbol`.
    */
   def readClassFile(classSymbol: String): Option[(String, Array[Byte])] =
     readClassFileFrom(classpathSnapshot(), classSymbol)
@@ -104,10 +104,10 @@ final class ClassfileHierarchyIndex(
    * method overload gets its own target, carrying its descriptor). Entry
    * points and their ancestors may live in different jars.
    */
-  def hierarchyMemberTargets(
+  def navigationTargets(
       entryPoints: Seq[String],
       memberName: String,
-  ): Seq[HierarchyMemberTarget] =
+  ): Seq[NavigationTarget] =
     walk(classpathSnapshot(), entryPoints.toList, memberName, Set.empty, Nil)
       .distinctBy(target =>
         (
@@ -119,9 +119,9 @@ final class ClassfileHierarchyIndex(
 
   /**
    * Breadth-first traversal of the type hierarchy: for each class in `frontier`
-   * record the targets it declares for `memberName`, then continue into its
+   * record the navigation targets it declares for `memberName`, then continue into its
    * supertypes. `visited` prevents revisiting a class reachable by multiple
-   * paths; `acc` collects targets in reverse discovery order.
+   * paths; `collectedTargets` collects targets in reverse discovery order.
    */
   @tailrec
   private def walk(
@@ -129,17 +129,18 @@ final class ClassfileHierarchyIndex(
       frontier: List[String],
       memberName: String,
       visited: Set[String],
-      acc: List[HierarchyMemberTarget],
-  ): List[HierarchyMemberTarget] =
+      collectedTargets: List[NavigationTarget],
+  ): List[NavigationTarget] =
     frontier match {
-      case Nil => acc.reverse
+      case Nil => collectedTargets.reverse
       case current :: rest if visited(current) =>
-        walk(entries, rest, memberName, visited, acc)
+        walk(entries, rest, memberName, visited, collectedTargets)
       case current :: rest =>
         readClass(entries, current) match {
-          case None => walk(entries, rest, memberName, visited + current, acc)
+          case None =>
+            walk(entries, rest, memberName, visited + current, collectedTargets)
           case Some((uri, info)) =>
-            val found = memberTargets(current, memberName, uri, info)
+            val found = memberNavigationTargets(current, memberName, uri, info)
             val supertypes =
               (info.superName ++ info.interfaces).map(internalNameToSymbol)
             walk(
@@ -147,7 +148,7 @@ final class ClassfileHierarchyIndex(
               rest ++ supertypes,
               memberName,
               visited + current,
-              found reverse_::: acc,
+              found reverse_::: collectedTargets,
             )
         }
     }
@@ -158,19 +159,19 @@ final class ClassfileHierarchyIndex(
    * can resolve that overload's own source line), or one for a field of that
    * name. Empty when the class declares no such member.
    */
-  private def memberTargets(
+  private def memberNavigationTargets(
       classSymbol: String,
       memberName: String,
       uri: String,
-      info: ClassfileInfo,
-  ): List[HierarchyMemberTarget] = {
+      info: ClassFileInfo,
+  ): List[NavigationTarget] = {
     val overloadDescriptors = info.methods.collect {
-      case (name, descriptor) if name == memberName => descriptor
+      case MethodInfo(name, descriptor) if name == memberName => descriptor
     }
     val result = if (overloadDescriptors.nonEmpty) {
       overloadDescriptors.zipWithIndex.map { case (descriptor, index) =>
         val disambiguator = if (index == 0) "()." else s"(+$index)."
-        HierarchyMemberTarget(
+        NavigationTarget(
           classSymbol + memberName + disambiguator,
           classLocation(uri),
           Some(descriptor),
@@ -178,7 +179,7 @@ final class ClassfileHierarchyIndex(
       }.toList
     } else if (info.fields.contains(memberName)) {
       List(
-        HierarchyMemberTarget(
+        NavigationTarget(
           classSymbol + memberName + ".",
           classLocation(uri),
           None,
@@ -191,7 +192,7 @@ final class ClassfileHierarchyIndex(
   }
 
   /**
-   * The 1-based source line of the method `memberName` on `classSymbol`, read
+   * The 1-based source line of the method `memberName` on `typeSymbol`, read
    * from its bytecode `LineNumberTable`. Used to jump to real source for a
    * method that exists only in compiled output (e.g. a Lombok accessor), where
    * the line points back at the annotated field. When `methodDescriptor` is
@@ -207,7 +208,7 @@ final class ClassfileHierarchyIndex(
     val result =
       readClassFile(classSymbol).flatMap { case (_, bytes) =>
         val visitor =
-          new ClassfileMemberLineVisitor(memberName, methodDescriptor)
+          new ClassFileMemberLineVisitor(memberName, methodDescriptor)
         // No SKIP_CODE: line numbers live in the Code attribute.
         new ClassReader(bytes).accept(visitor, ClassReader.SKIP_FRAMES)
         visitor.line
@@ -218,10 +219,10 @@ final class ClassfileHierarchyIndex(
   private def readClass(
       entries: Seq[AbsolutePath],
       classSymbol: String,
-  ): Option[(String, ClassfileInfo)] = {
+  ): Option[(String, ClassFileInfo)] = {
     val result =
       readClassFileFrom(entries, classSymbol).map { case (uri, bytes) =>
-        val visitor = new ClassfileInfoVisitor
+        val visitor = new ClassFileInfoVisitor
         new ClassReader(bytes).accept(
           visitor,
           ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES,

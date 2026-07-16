@@ -7,8 +7,7 @@ import java.time.Duration
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import java.{util => ju}
-
+import java.util as ju
 import scala.annotation.nowarn
 import scala.collection.concurrent.TrieMap
 import scala.concurrent.ExecutionContextExecutorService
@@ -16,8 +15,7 @@ import scala.concurrent.Future
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 import scala.util.control.NonFatal
-import scala.{meta => m}
-
+import scala.meta as m
 import scala.meta.infra.Event
 import scala.meta.infra.FeatureFlagProvider
 import scala.meta.infra.MonitoringClient
@@ -29,9 +27,9 @@ import scala.meta.internal.builds.SbtBuildTool
 import scala.meta.internal.metals.CompilerOffsetParamsUtils
 import scala.meta.internal.metals.CompilerRangeParamsUtils
 import scala.meta.internal.metals.Compilers.PresentationCompilerKey
-import scala.meta.internal.metals.MetalsEnrichments._
-import scala.meta.internal.metals.decompile.ClassHierarchyTargetProvider
+import scala.meta.internal.metals.MetalsEnrichments.*
 import scala.meta.internal.metals.decompile.DecompileBytecode
+import scala.meta.internal.metals.decompile.NavigationTargetProvider
 import scala.meta.internal.metals.mbt.MbtBuild
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
 import scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles
@@ -43,7 +41,7 @@ import scala.meta.internal.pc.PcSymbolInformation
 import scala.meta.internal.protopc.ProtoPresentationCompiler
 import scala.meta.internal.worksheets.WorksheetPcData
 import scala.meta.internal.worksheets.WorksheetProvider
-import scala.meta.internal.{semanticdb => s}
+import scala.meta.internal.semanticdb as s
 import scala.meta.io.AbsolutePath
 import scala.meta.pc.AutoImportsResult
 import scala.meta.pc.CancelToken
@@ -58,7 +56,6 @@ import scala.meta.pc.SemanticdbFileManager
 import scala.meta.pc.SymbolSearch
 import scala.meta.pc.SyntheticDecorationsParams
 import scala.meta.pc.VirtualFileParams
-
 import ch.epfl.scala.bsp4j.BuildTargetIdentifier
 import ch.epfl.scala.bsp4j.CompileReport
 import com.google.common.cache.CacheBuilder
@@ -84,11 +81,13 @@ import org.eclipse.lsp4j.SignatureHelp
 import org.eclipse.lsp4j.TextDocumentIdentifier
 import org.eclipse.lsp4j.TextDocumentPositionParams
 import org.eclipse.lsp4j.TextEdit
-import org.eclipse.lsp4j.jsonrpc.messages.{Either => JEither}
-import org.eclipse.lsp4j.{Position => LspPosition}
-import org.eclipse.lsp4j.{Range => LspRange}
-import org.eclipse.lsp4j.{debug => d}
-import org.eclipse.{lsp4j => l}
+import org.eclipse.lsp4j.jsonrpc.messages.Either as JEither
+import org.eclipse.lsp4j.Position as LspPosition
+import org.eclipse.lsp4j.Range as LspRange
+import org.eclipse.lsp4j.debug as d
+import org.eclipse.lsp4j as l
+
+import java.util.Optional
 
 /**
  * Manages lifecycle for presentation compilers in all build targets.
@@ -1600,7 +1599,7 @@ class Compilers(
   /**
    * Definition targets for a JVM library symbol that the presentation compiler
    * resolved but left without a source location. See
-   * [[scala.meta.internal.metals.decompile.ClassHierarchyTargetProvider]].
+   * [[scala.meta.internal.metals.decompile.NavigationTargetProvider]].
    */
   def classHierarchyTargets(
       symbol: String
@@ -1608,7 +1607,7 @@ class Compilers(
     classHierarchyTargetProvider.classHierarchyTargets(symbol)
 
   private val classHierarchyTargetProvider =
-    new ClassHierarchyTargetProvider(
+    new NavigationTargetProvider(
       () =>
         buildTargets.allWorkspaceJars ++
           fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_)) ++
@@ -1702,9 +1701,9 @@ class Compilers(
           val scalaVersion =
             scalaVersionSelector.fallbackScalaVersion()
           if (
-            !path.toNIO.startsWith(tmpDirectory.toNIO)
+            !path.toNIO.startsWith(tmpDirectory.toNIO) &&
             // don't spam the log with the same message about the same file
-            && !lastPathWithFallbackCompiler.contains(path)
+            !lastPathWithFallbackCompiler.contains(path)
           ) {
             scribe.debug(
               s"no build target found for $path, try syncing the file for full IDE support." +

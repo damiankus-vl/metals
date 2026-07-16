@@ -22,15 +22,15 @@ import org.eclipse.{lsp4j => l}
  * top-level type is owned by its package. A member symbol therefore never
  * reaches a class-file lookup as if it were a class.
  */
-private sealed trait SymbolNavigation
-private object SymbolNavigation {
+private sealed trait SymbolKind
+private object SymbolKind {
 
   /** The symbol is itself a class on the classpath. */
-  final case class AsType(classSymbol: String) extends SymbolNavigation
+  final case class Type(typeSymbol: String) extends SymbolKind
 
   /** A member `memberName` reachable through `ownerSymbol`'s hierarchy. */
-  final case class AsMember(ownerSymbol: String, memberName: String)
-      extends SymbolNavigation
+  final case class Member(ownerSymbol: String, memberName: String)
+      extends SymbolKind
 }
 
 /**
@@ -52,14 +52,14 @@ private object SymbolNavigation {
  *   the member's bytecode line (so a compiled-only member like a Lombok
  *   accessor lands on the annotated field) instead of at the `.class`.
  */
-final class ClassHierarchyTargetProvider(
+final class NavigationTargetProvider(
     classpathEntries: () => Iterator[AbsolutePath],
     protoJavaOutlineFor: String => Option[VirtualTextDocument],
     classSourceFile: String => Option[AbsolutePath],
 )(implicit ec: ExecutionContext) {
 
-  private val classfileHierarchyIndex =
-    new ClassfileHierarchyIndex(classpathEntries)
+  private val classFileHierarchyIndex =
+    new ClassFileHierarchyIndex(classpathEntries)
 
   /**
    * Definition targets for `symbol`, each pairing a `.class` location with the
@@ -74,11 +74,11 @@ final class ClassHierarchyTargetProvider(
       symbol: String
   ): Future[Seq[(String, l.Location)]] = Future {
     val result = classify(symbol) match {
-      case Some(SymbolNavigation.AsType(classSymbol)) =>
+      case Some(SymbolKind.Type(classSymbol)) =>
         typeTargets(classSymbol)
-      case Some(SymbolNavigation.AsMember(ownerSymbol, memberName)) =>
-        val members = classfileHierarchyIndex
-          .hierarchyMemberTargets(entryPointClasses(ownerSymbol), memberName)
+      case Some(SymbolKind.Member(ownerSymbol, memberName)) =>
+        val members = classFileHierarchyIndex
+          .navigationTargets(entryPointClasses(ownerSymbol), memberName)
           .map(target =>
             target.memberSymbol -> preferSource(target, memberName)
           )
@@ -99,14 +99,14 @@ final class ClassHierarchyTargetProvider(
    * location (to be decompiled by the caller).
    */
   private def preferSource(
-      target: HierarchyMemberTarget,
+      target: NavigationTarget,
       memberName: String,
   ): l.Location = {
     val declaringClass = Symbol(target.memberSymbol).owner.value
     val sourceLocation =
       for {
         source <- classSourceFile(declaringClass)
-        line <- classfileHierarchyIndex.memberSourceLine(
+        line <- classFileHierarchyIndex.memberSourceLine(
           declaringClass,
           memberName,
           target.methodDescriptor,
@@ -202,7 +202,7 @@ final class ClassHierarchyTargetProvider(
 
   private def typeTargets(classSymbol: String): Seq[(String, l.Location)] = {
     val result =
-      classfileHierarchyIndex
+      classFileHierarchyIndex
         .classFileLocation(classSymbol)
         .map(classSymbol -> _)
         .toList
@@ -215,14 +215,14 @@ final class ClassHierarchyTargetProvider(
    * type is a member (or a nested type reported the same way); a symbol owned by
    * a package is a top-level type.
    */
-  private def classify(symbol: String): Option[SymbolNavigation] = {
+  private def classify(symbol: String): Option[SymbolKind] = {
     val sym = Symbol(symbol)
     val ownerSymbol = sym.owner.value
     val memberName = memberNameOf(symbol, ownerSymbol)
     val result =
       if (memberName.nonEmpty && Symbol(ownerSymbol).isType)
-        Some(SymbolNavigation.AsMember(ownerSymbol, memberName))
-      else if (sym.isType) Some(SymbolNavigation.AsType(symbol))
+        Some(SymbolKind.Member(ownerSymbol, memberName))
+      else if (sym.isType) Some(SymbolKind.Type(symbol))
       else None
     result
   }
@@ -246,13 +246,15 @@ final class ClassHierarchyTargetProvider(
    */
   private def entryPointClasses(ownerSymbol: String): Seq[String] = {
     val result =
-      if (classfileHierarchyIndex.readClassFile(ownerSymbol).isDefined)
+      if (classFileHierarchyIndex.readClassFile(ownerSymbol).isDefined) {
         Seq(ownerSymbol)
-      else protoOutlineSupertypes(ownerSymbol).distinct
+      } else {
+        protoOutlineSupertypes(ownerSymbol).distinct
+      }
     result
   }
 
-  /** Supertype class symbols declared by the synthesized outline of `classSymbol`. */
+  /** Supertype class symbols declared by the synthesized outline of `typeSymbol`. */
   private def protoOutlineSupertypes(classSymbol: String): Seq[String] = {
     val result =
       protoJavaOutlineFor(classSymbol).toSeq
@@ -274,7 +276,9 @@ final class ClassHierarchyTargetProvider(
     val result =
       classHeader(text, simpleName).toSeq.flatMap { header =>
         (supertypesAfter(header, "extends") ++
-          supertypesAfter(header, "implements")).map(fqnToClassSymbol)
+          supertypesAfter(header, "implements")).map(
+          fullyQualifiedNameToClassSymbol
+        )
       }
     result
   }
@@ -308,7 +312,7 @@ final class ClassHierarchyTargetProvider(
   /**
    * The comma-separated type names following `keyword` (`extends`/`implements`)
    * in a class header, stopping at the next such keyword. Generic arguments are
-   * kept intact ([[splitTopLevelCommas]]), and matching is whole-word so a name
+   * kept intact ([[ancestors]]), and matching is whole-word so a name
    * containing the keyword as a substring isn't misread.
    */
   private def supertypesAfter(header: String, keyword: String): Seq[String] = {
@@ -322,7 +326,7 @@ final class ClassHierarchyTargetProvider(
             Seq(rest.indexOf(" extends "), rest.indexOf(" implements "))
               .filter(_ >= 0)
           val end = if (stops.isEmpty) rest.length else stops.min
-          splitTopLevelCommas(rest.substring(0, end))
+          ancestors(rest.substring(0, end))
             .map(_.trim)
             .filter(_.nonEmpty)
       }
@@ -331,28 +335,32 @@ final class ClassHierarchyTargetProvider(
 
   /**
    * Splits on commas that are not nested inside a generic type argument list, so
-   * `Foo<A, B>, Bar` yields `Foo<A, B>` and `Bar` rather than four fragments.
+   * `Foo<A, B>, Bar` (Java) and `Foo[A, B], Bar` (Scala) both yield `Foo<A, B>`/
+   * `Foo[A, B]` and `Bar` rather than four fragments.
    */
-  private def splitTopLevelCommas(text: String): Seq[String] = {
-    val parts = List.newBuilder[String]
-    val current = new StringBuilder
-    var depth = 0
-    for (c <- text) {
-      c match {
-        case '<' => depth += 1; current.append(c)
-        case '>' => if (depth > 0) depth -= 1; current.append(c)
-        case ',' if depth == 0 =>
-          parts += current.toString
-          current.clear()
-        case _ => current.append(c)
+  private def ancestors(text: String): Seq[String] = {
+    val (parts, _, current) =
+      text.foldLeft((Vector.empty[String], 0, "")) {
+        case ((parts, depth, current), character @ ('<' | '[')) =>
+          (parts, depth + 1, current :+ character)
+        case ((parts, depth, current), character @ ('>' | ']')) =>
+          (parts, math.max(0, depth - 1), current :+ character)
+        case ((parts, depth, current), ',') if depth == 0 =>
+          (parts :+ current, depth, "")
+        case ((parts, depth, current), character) =>
+          (parts, depth, current :+ character)
       }
-    }
-    parts += current.toString
-    parts.result()
+    parts :+ current
   }
 
-  private def fqnToClassSymbol(fqn: String): String = {
-    val result = fqn.takeWhile(_ != '<').trim.replace('.', '/') + "#"
+  private def fullyQualifiedNameToClassSymbol(
+      fullyQualifiedName: String
+  ): String = {
+    val result =
+      fullyQualifiedName
+        .takeWhile(c => c != '<' && c != '[')
+        .trim
+        .replace('.', '/') + "#"
     result
   }
 }

@@ -8,7 +8,7 @@ import scala.concurrent.Await
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
 
-import scala.meta.internal.metals.decompile.ClassHierarchyTargetProvider
+import scala.meta.internal.metals.decompile.NavigationTargetProvider
 import scala.meta.internal.metals.mbt.VirtualTextDocument
 import scala.meta.io.AbsolutePath
 import scala.meta.pc.Language
@@ -18,7 +18,7 @@ import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Label
 import org.objectweb.asm.Opcodes
 
-class ClassHierarchyTargetProviderSuite extends munit.FunSuite {
+class NavigationTargetProviderSuite extends munit.FunSuite {
 
   implicit val ec: ExecutionContext = ExecutionContext.global
 
@@ -73,7 +73,7 @@ class ClassHierarchyTargetProviderSuite extends munit.FunSuite {
     )
     val source = AbsolutePath(sourceFile)
 
-    val provider = new ClassHierarchyTargetProvider(
+    val provider = new NavigationTargetProvider(
       () => Iterator(AbsolutePath(classDir)),
       _ => None,
       classSymbol => Option.when(classSymbol == "com/example/Bean#")(source),
@@ -122,7 +122,7 @@ class ClassHierarchyTargetProviderSuite extends munit.FunSuite {
       Seq("com/example/Foo#"),
     )
 
-    val provider = new ClassHierarchyTargetProvider(
+    val provider = new NavigationTargetProvider(
       () => Iterator(AbsolutePath(classDir)),
       classSymbol => Option.when(classSymbol == "com/example/Foo#")(outline),
       _ => None,
@@ -137,6 +137,45 @@ class ClassHierarchyTargetProviderSuite extends munit.FunSuite {
     assert(
       targets.head._2.getUri().endsWith("com/example/Base.class"),
       s"expected the Base .class location, got: ${targets.head._2.getUri()}",
+    )
+  }
+
+  test("entry-point-from-proto-outline-with-bracket-generics") {
+    // Square-bracket type arguments (Scala-style, e.g. `Base[String, Int]`)
+    // must not be mistaken for a second, comma-separated supertype the way a
+    // Java `<...>` generic already isn't.
+    val classDir = Files.createTempDirectory("classdir")
+    writeClass(classDir, "com/example/Base", "getValue", sourceLine = 5)
+    writeClass(classDir, "com/example/Other", "getValue", sourceLine = 9)
+
+    val outlineText =
+      List(
+        "package com.example;",
+        "public final class Foo extends com.example.Base[String, Int], com.example.Other {",
+        "}",
+      ).mkString("\n")
+    val outline = VirtualTextDocument(
+      URI.create("file:///Foo.java"),
+      Language.JAVA,
+      outlineText,
+      Seq("com/example"),
+      Seq("com/example/Foo#"),
+    )
+
+    val provider = new NavigationTargetProvider(
+      () => Iterator(AbsolutePath(classDir)),
+      classSymbol => Option.when(classSymbol == "com/example/Foo#")(outline),
+      _ => None,
+    )
+
+    val targets = Await.result(
+      provider.classHierarchyTargets("com/example/Foo#getValue#"),
+      10.seconds,
+    )
+
+    assertEquals(
+      targets.map(_._1).toSet,
+      Set("com/example/Base#getValue().", "com/example/Other#getValue()."),
     )
   }
 }

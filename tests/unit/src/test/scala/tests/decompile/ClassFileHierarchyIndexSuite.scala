@@ -3,14 +3,14 @@ package tests.decompile
 import java.nio.file.Files
 import java.nio.file.Path
 
-import scala.meta.internal.metals.decompile.ClassfileHierarchyIndex
+import scala.meta.internal.metals.decompile.ClassFileHierarchyIndex
 import scala.meta.io.AbsolutePath
 
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Label
 import org.objectweb.asm.Opcodes
 
-class ClassfileHierarchyIndexSuite extends munit.FunSuite {
+class ClassFileHierarchyIndexSuite extends munit.FunSuite {
 
   private def writeClass(
       dir: Path,
@@ -47,9 +47,9 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
   test("reads-class-and-member-from-directory") {
     val dir = Files.createTempDirectory("classdir")
     writeClass(dir, "com/example/Foo", "java/lang/Object", "bar")
-    val index = new ClassfileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
+    val index = new ClassFileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
 
-    val targets = index.hierarchyMemberTargets(Seq("com/example/Foo#"), "bar")
+    val targets = index.navigationTargets(Seq("com/example/Foo#"), "bar")
     assertEquals(targets.map(_.memberSymbol), List("com/example/Foo#bar()."))
 
     val location = index.classFileLocation("com/example/Foo#")
@@ -71,12 +71,12 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
     writeClass(childDir, "com/example/Child", "com/example/Base", "childOnly")
     writeClass(parentDir, "com/example/Base", "java/lang/Object", "inherited")
     val index =
-      new ClassfileHierarchyIndex(() =>
+      new ClassFileHierarchyIndex(() =>
         Iterator(AbsolutePath(childDir), AbsolutePath(parentDir))
       )
 
     val targets =
-      index.hierarchyMemberTargets(Seq("com/example/Child#"), "inherited")
+      index.navigationTargets(Seq("com/example/Child#"), "inherited")
     assertEquals(
       targets.map(_.memberSymbol),
       List("com/example/Base#inherited()."),
@@ -125,10 +125,10 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
       "set",
       Seq("(I)V" -> 10, "(Ljava/lang/String;)V" -> 20),
     )
-    val index = new ClassfileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
+    val index = new ClassFileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
 
     val targets =
-      index.hierarchyMemberTargets(Seq("com/example/Setter#"), "set")
+      index.navigationTargets(Seq("com/example/Setter#"), "set")
     assertEquals(
       targets.map(_.memberSymbol),
       List("com/example/Setter#set().", "com/example/Setter#set(+1)."),
@@ -153,7 +153,7 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
       "getName",
       sourceLine = Some(42),
     )
-    val index = new ClassfileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
+    val index = new ClassFileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
 
     assertEquals(
       index.memberSourceLine("com/example/Bean#", "getName"),
