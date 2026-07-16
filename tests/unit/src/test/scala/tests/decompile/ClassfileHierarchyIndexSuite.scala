@@ -50,7 +50,7 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
     val index = new ClassfileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
 
     val targets = index.hierarchyMemberTargets(Seq("com/example/Foo#"), "bar")
-    assertEquals(targets.map(_._1), List("com/example/Foo#bar()."))
+    assertEquals(targets.map(_.memberSymbol), List("com/example/Foo#bar()."))
 
     val location = index.classFileLocation("com/example/Foo#")
     assert(
@@ -77,7 +77,71 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
 
     val targets =
       index.hierarchyMemberTargets(Seq("com/example/Child#"), "inherited")
-    assertEquals(targets.map(_._1), List("com/example/Base#inherited()."))
+    assertEquals(
+      targets.map(_.memberSymbol),
+      List("com/example/Base#inherited()."),
+    )
+  }
+
+  private def writeOverloadedClass(
+      dir: Path,
+      internalName: String,
+      methodName: String,
+      overloads: Seq[(String, Int)],
+  ): Unit = {
+    val cw = new ClassWriter(0)
+    cw.visit(
+      Opcodes.V1_8,
+      Opcodes.ACC_PUBLIC,
+      internalName,
+      null,
+      "java/lang/Object",
+      null,
+    )
+    for ((descriptor, sourceLine) <- overloads) {
+      val mv =
+        cw.visitMethod(Opcodes.ACC_PUBLIC, methodName, descriptor, null, null)
+      mv.visitCode()
+      val label = new Label()
+      mv.visitLabel(label)
+      mv.visitLineNumber(sourceLine, label)
+      mv.visitInsn(Opcodes.RETURN)
+      mv.visitMaxs(0, 2)
+      mv.visitEnd()
+    }
+    cw.visitEnd()
+    val classFile = dir.resolve(s"$internalName.class")
+    Files.createDirectories(classFile.getParent)
+    Files.write(classFile, cw.toByteArray())
+  }
+
+  test("overloads-resolve-their-own-source-line") {
+    // Two methods share a name but differ by descriptor; each must resolve to
+    // its own bytecode line rather than both collapsing onto the first.
+    val dir = Files.createTempDirectory("overloaddir")
+    writeOverloadedClass(
+      dir,
+      "com/example/Setter",
+      "set",
+      Seq("(I)V" -> 10, "(Ljava/lang/String;)V" -> 20),
+    )
+    val index = new ClassfileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
+
+    val targets =
+      index.hierarchyMemberTargets(Seq("com/example/Setter#"), "set")
+    assertEquals(
+      targets.map(_.memberSymbol),
+      List("com/example/Setter#set().", "com/example/Setter#set(+1)."),
+    )
+
+    val lines = targets.map(target =>
+      index.memberSourceLine(
+        "com/example/Setter#",
+        "set",
+        target.methodDescriptor,
+      )
+    )
+    assertEquals(lines, List(Some(10), Some(20)))
   }
 
   test("reads-member-source-line-from-bytecode") {

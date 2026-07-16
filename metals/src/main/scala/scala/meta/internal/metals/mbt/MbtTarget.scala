@@ -157,7 +157,7 @@ case class MbtTarget(
       includeTests: Boolean = false,
   ): List[AbsolutePath] = {
     if (classDirectories.nonEmpty) {
-      classDirectories.distinct.map(resolveClassDir(workspace, _)).toList
+      resolvedClassDirectories(workspace).toList
     } else
       MbtTarget.conventionalClassDirectories(
         workspace,

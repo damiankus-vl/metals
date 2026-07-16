@@ -147,7 +147,7 @@ object BazelMbtBuildSupport {
             dependsByNs.getOrElse(namespace, Set.empty),
             externalDepsByNs.getOrElse(namespace, Set.empty),
             runTargetsByNs.getOrElse(namespace, Set.empty),
-            classDirectoriesByNs.get(namespace),
+            classDirectoriesByNs.getOrElse(namespace, Nil),
             scalaVersion,
             genSrcOutputsByNamespaces
               .getOrElse(namespace, mutable.Buffer.empty)
@@ -168,7 +168,7 @@ object BazelMbtBuildSupport {
           Set.empty,
           allExtDeps,
           runTargetsByNs.getOrElse(workspaceNamespaceName, Set.empty),
-          classDirectoriesByNs.get(workspaceNamespaceName),
+          classDirectoriesByNs.getOrElse(workspaceNamespaceName, Nil),
           scalaVersion,
           allGenSrcOutputs,
         )
@@ -290,21 +290,28 @@ object BazelMbtBuildSupport {
     outgoing.map { case (k, v) => k -> v.toSet }.toMap
   }
 
+  /**
+   * All class directories contributing to each namespace, not just the first
+   * candidate: a single namespace (e.g. a BuildFile-granularity one) can
+   * aggregate several library targets, and a member may exist only in the
+   * compiled output of a non-first one (e.g. a Lombok-generated accessor), so
+   * keeping every candidate is what makes that member reachable.
+   */
   private def computeClassDirectories(
       targetLabels: List[String],
       runTargetsByNs: Map[String, Set[String]],
       classDirectoriesByTarget: Map[String, String],
       keys: Map[String, String],
-  ): Map[String, String] =
+  ): Map[String, Seq[String]] =
     keys.values.toSet.flatMap { (namespace: String) =>
       val preferredTargets = runTargetsByNs.getOrElse(namespace, Set.empty)
       val fallbackTargets =
         targetLabels.filter(target => keys(target) == namespace)
       val candidates = preferredTargets.toSeq.sorted ++ fallbackTargets
-      candidates
-        .flatMap(classDirectoriesByTarget.get)
-        .headOption
-        .map(dir => namespace -> dir)
+      val directories =
+        candidates.flatMap(classDirectoriesByTarget.get).distinct
+      if (directories.isEmpty) None
+      else Some(namespace -> directories)
     }.toMap
 
   private def putNamespace(
@@ -316,7 +323,7 @@ object BazelMbtBuildSupport {
       dependsOn: Set[String],
       dependencyModuleIds: Set[String],
       runTargets: Set[String],
-      classDirectory: Option[String],
+      classDirectories: Seq[String],
       scalaVersion: Option[String],
       uncheckedSources: Seq[String] = Nil,
   ): Unit = {
@@ -332,7 +339,7 @@ object BazelMbtBuildSupport {
         scalaVersion = scalaVersion.orNull,
         javaHome = null,
         dependsOn = dependsOn.toSeq.sorted.asJava,
-        classDirectories = classDirectory.toList.asJava,
+        classDirectories = classDirectories.distinct.asJava,
         configurations = sortedRunTargets,
         uncheckedSources =
           if (uncheckedSources.isEmpty) null
@@ -356,7 +363,7 @@ object BazelMbtBuildSupport {
       Set.empty,
       dependencyModuleIds,
       Set.empty,
-      None,
+      Nil,
       scalaVersion,
     )
     m

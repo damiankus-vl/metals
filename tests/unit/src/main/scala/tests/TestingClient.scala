@@ -17,6 +17,7 @@ import scala.meta.internal.builds.BuildTools
 import scala.meta.internal.metals.Buffers
 import scala.meta.internal.metals.ClientCommands
 import scala.meta.internal.metals.Debug
+import scala.meta.internal.metals.DecompilationConsent
 import scala.meta.internal.metals.FileOutOfScalaCliBspScope
 import scala.meta.internal.metals.Icons
 import scala.meta.internal.metals.Messages._
@@ -468,7 +469,11 @@ class TestingClient(workspace: AbsolutePath, val buffers: Buffers)
           ) {
             // Grant decompilation consent by default; suites that exercise the
             // consent prompt itself override showMessageRequestHandler.
-            params.getActions().asScala.find(_.getTitle() == "Proceed").orNull
+            params
+              .getActions()
+              .asScala
+              .find(_.getTitle() == DecompilationConsent.allowThisSessionTitle)
+              .orNull
           } else if (ResetWorkspace.params() == params) {
             resetWorkspace
           } else if (OldBloopVersionRunning.params() == params) {

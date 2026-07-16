@@ -19,7 +19,14 @@ class ThirdPartyDefinitionLspSuite
     for {
       _ <- initialize(
         """|/metals.json
-           |{ "a": { "libraryDependencies": ["args4j:args4j:2.37"], "skipSources": true } }
+           |{
+           |  "a": {
+           |    "libraryDependencies": [
+           |      "args4j:args4j:2.37"
+           |    ],
+           |    "skipSources": true
+           |  }
+           |}
            |/a/src/main/scala/a/Main.scala
            |package a
            |import org.kohsuke.args4j.Starter

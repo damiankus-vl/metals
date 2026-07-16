@@ -1,5 +1,7 @@
 package scala.meta.internal.metals.decompile
 
+import java.util.regex.Pattern
+
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 
@@ -77,13 +79,9 @@ final class ClassHierarchyTargetProvider(
       case Some(SymbolNavigation.AsMember(ownerSymbol, memberName)) =>
         val members = classfileHierarchyIndex
           .hierarchyMemberTargets(seedClasses(ownerSymbol), memberName)
-          .map { case (memberSymbol, classLocation) =>
-            memberSymbol -> preferSource(
-              memberSymbol,
-              memberName,
-              classLocation,
-            )
-          }
+          .map(target =>
+            target.memberSymbol -> preferSource(target, memberName)
+          )
         // A type-owned symbol is usually a member, but the same shape also
         // describes a nested type the PC reported as `Owner#Nested#`. Only when
         // no class in the hierarchy declares the member do we fall back to
@@ -101,23 +99,23 @@ final class ClassHierarchyTargetProvider(
    * location (to be decompiled by the caller).
    */
   private def preferSource(
-      memberSymbol: String,
+      target: HierarchyMemberTarget,
       memberName: String,
-      classLocation: l.Location,
   ): l.Location = {
-    val declaringClass = Symbol(memberSymbol).owner.value
+    val declaringClass = Symbol(target.memberSymbol).owner.value
     val sourceLocation =
       for {
         source <- classSourceFile(declaringClass)
         line <- classfileHierarchyIndex.memberSourceLine(
           declaringClass,
           memberName,
+          target.methodDescriptor,
         )
       } yield new l.Location(
         source.toURI.toString,
         memberRange(source, line, memberName),
       )
-    sourceLocation.getOrElse(classLocation)
+    sourceLocation.getOrElse(target.classLocation)
   }
 
   /**
@@ -273,28 +271,60 @@ final class ClassHierarchyTargetProvider(
       text: String,
       simpleName: String,
   ): Seq[String] = {
-    val start = text.indexOf(s"class $simpleName ")
     val result =
-      if (start < 0) Nil
-      else {
-        val brace = text.indexOf('{', start)
-        val header =
-          text.substring(start, if (brace < 0) text.length else brace)
-        def listAfter(keyword: String): Seq[String] = {
-          val i = header.indexOf(s" $keyword ")
-          if (i < 0) Nil
-          else {
-            val rest = header.substring(i + keyword.length + 2)
-            val stops =
-              Seq(rest.indexOf(" extends "), rest.indexOf(" implements "))
-                .filter(_ >= 0)
-            val end = if (stops.isEmpty) rest.length else stops.min
-            splitTopLevelCommas(rest.substring(0, end))
-              .map(_.trim)
-              .filter(_.nonEmpty)
-          }
-        }
-        (listAfter("extends") ++ listAfter("implements")).map(fqnToClassSymbol)
+      classHeader(text, simpleName).toSeq.flatMap { header =>
+        (supertypesAfter(header, "extends") ++
+          supertypesAfter(header, "implements")).map(fqnToClassSymbol)
+      }
+    result
+  }
+
+  /**
+   * The declaration header of `class simpleName` — from just after the class
+   * name up to its opening `{` — or `None` when the class isn't declared.
+   * Comments are stripped first so a `class Name` inside a doc comment can't be
+   * mistaken for the declaration, and both `class` and the name are matched as
+   * whole tokens so neither a longer identifier (`classLoader`, `FooBar` for
+   * `Foo`) nor an annotation ahead of the keyword throws the scan off.
+   */
+  private def classHeader(text: String, simpleName: String): Option[String] = {
+    val withoutComments = stripComments(text)
+    val pattern =
+      raw"(?<![\w$$])class\s+${Pattern.quote(simpleName)}(?![\w$$])".r
+    val result =
+      pattern.findFirstMatchIn(withoutComments).map { classMatch =>
+        val afterName = withoutComments.substring(classMatch.end)
+        val brace = afterName.indexOf('{')
+        if (brace < 0) afterName else afterName.substring(0, brace)
+      }
+    result
+  }
+
+  private def stripComments(text: String): String = {
+    val withoutBlockComments = text.replaceAll("(?s)/\\*.*?\\*/", " ")
+    withoutBlockComments.replaceAll("//[^\\n]*", " ")
+  }
+
+  /**
+   * The comma-separated type names following `keyword` (`extends`/`implements`)
+   * in a class header, stopping at the next such keyword. Generic arguments are
+   * kept intact ([[splitTopLevelCommas]]), and matching is whole-word so a name
+   * containing the keyword as a substring isn't misread.
+   */
+  private def supertypesAfter(header: String, keyword: String): Seq[String] = {
+    val pattern = raw"(?<![\w$$])${Pattern.quote(keyword)}(?![\w$$])\s+".r
+    val result =
+      pattern.findFirstMatchIn(header) match {
+        case None => Nil
+        case Some(keywordMatch) =>
+          val rest = header.substring(keywordMatch.end)
+          val stops =
+            Seq(rest.indexOf(" extends "), rest.indexOf(" implements "))
+              .filter(_ >= 0)
+          val end = if (stops.isEmpty) rest.length else stops.min
+          splitTopLevelCommas(rest.substring(0, end))
+            .map(_.trim)
+            .filter(_.nonEmpty)
       }
     result
   }

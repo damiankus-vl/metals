@@ -1,5 +1,6 @@
 package tests.decompile
 
+import java.net.URI
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -8,7 +9,9 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
 
 import scala.meta.internal.metals.decompile.ClassHierarchyTargetProvider
+import scala.meta.internal.metals.mbt.VirtualTextDocument
 import scala.meta.io.AbsolutePath
+import scala.meta.pc.Language
 
 import org.eclipse.{lsp4j => l}
 import org.objectweb.asm.ClassWriter
@@ -94,6 +97,46 @@ class ClassHierarchyTargetProviderSuite extends munit.FunSuite {
         new l.Position(2, expectedColumn),
         new l.Position(2, expectedColumn + "value".length),
       ),
+    )
+  }
+
+  test("seeds-from-proto-outline-ignoring-comment-decoys") {
+    // The owner isn't on the classpath, so the walk seeds from its synthesized
+    // outline's supertypes. A doc comment mentions "class Foo" before the real
+    // declaration; the scan must skip the comment and read the true `extends`,
+    // otherwise the inherited member is unreachable.
+    val classDir = Files.createTempDirectory("classdir")
+    writeClass(classDir, "com/example/Base", "getValue", sourceLine = 5)
+
+    val outlineText =
+      List(
+        "package com.example;",
+        "/** See {@link Foo}: the class Foo replacement lives here. */",
+        "@Deprecated", "public final class Foo extends com.example.Base {", "}",
+      ).mkString("\n")
+    val outline = VirtualTextDocument(
+      URI.create("file:///Foo.java"),
+      Language.JAVA,
+      outlineText,
+      Seq("com/example"),
+      Seq("com/example/Foo#"),
+    )
+
+    val provider = new ClassHierarchyTargetProvider(
+      () => Iterator(AbsolutePath(classDir)),
+      classSymbol => Option.when(classSymbol == "com/example/Foo#")(outline),
+      _ => None,
+    )
+
+    val targets = Await.result(
+      provider.classHierarchyTargets("com/example/Foo#getValue#"),
+      10.seconds,
+    )
+
+    assertEquals(targets.map(_._1), List("com/example/Base#getValue()."))
+    assert(
+      targets.head._2.getUri().endsWith("com/example/Base.class"),
+      s"expected the Base .class location, got: ${targets.head._2.getUri()}",
     )
   }
 }

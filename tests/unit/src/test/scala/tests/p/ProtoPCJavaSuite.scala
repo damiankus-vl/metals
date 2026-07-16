@@ -5,6 +5,7 @@ import java.nio.file.Files
 import scala.concurrent.Future
 
 import scala.meta.internal.jdk.CollectionConverters._
+import scala.meta.internal.metals.DecompilationConsent
 
 import org.eclipse.lsp4j.Location
 import tests.BuildInfoVersions
@@ -1794,7 +1795,10 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
   private def proceedWithDecompilation(): Unit =
     client.showMessageRequestHandler = { params =>
       if (params.getMessage().startsWith("Metals is about to decompile"))
-        params.getActions().asScala.find(_.getTitle() == "Proceed")
+        params
+          .getActions()
+          .asScala
+          .find(_.getTitle() == DecompilationConsent.allowThisSessionTitle)
       else None
     }
 

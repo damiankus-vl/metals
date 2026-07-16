@@ -193,9 +193,11 @@ final class DefinitionProvider(
   }
 
   /**
-   * When goto-definition from a Java file resolves a JVM library symbol (a type,
-   * or a member inherited from a compiled class) but finds no source, point at
-   * the class(es) on the compiler classpath. In MBT/Bazel workspaces the
+   * When goto-definition from a Java or Scala file resolves a JVM library symbol
+   * (a type, or a member inherited from a compiled class) but finds no source,
+   * point at the class(es) on the compiler classpath. The mechanism is purely
+   * bytecode-level, so it is not restricted by the triggering source language.
+   * In MBT/Bazel workspaces the
    * dependency source jars aren't indexed, so this is the only way such
    * references become navigable; in other workspaces it only fires when nothing
    * else resolved, so it is purely additive.
@@ -214,7 +216,7 @@ final class DefinitionProvider(
     if (
       result.isEmpty &&
       isNavigableJvmClass(result.symbol) &&
-      path.isJavaFilename
+      path.isScalaOrJava
     ) {
       compilers().classHierarchyTargets(result.symbol).flatMap { targets =>
         if (targets.isEmpty) Future.successful(result)
@@ -235,14 +237,25 @@ final class DefinitionProvider(
                 )
               )
               if (deduped.isEmpty) result
-              else
+              else {
+                // Record the destination when it is unambiguous, so
+                // InteractiveSemanticdbs.didDefinition can remember which build
+                // target this jump came from and later requests inside the
+                // destination resolve against that target's classpath. With
+                // several picker entries there is no single destination to
+                // record.
+                val destinations =
+                  deduped.map(_.getUri().toAbsolutePath).toSet
+                val definition =
+                  if (destinations.size == 1) Some(destinations.head) else None
                 DefinitionResult(
                   deduped.asJava,
                   result.symbol,
-                  None,
+                  definition,
                   None,
                   result.querySymbol,
                 )
+              }
             }
       }
     } else Future.successful(result)
