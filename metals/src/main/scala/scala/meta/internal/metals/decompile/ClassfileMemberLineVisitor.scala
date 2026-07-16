@@ -5,6 +5,12 @@ import org.objectweb.asm.Label
 import org.objectweb.asm.MethodVisitor
 import org.objectweb.asm.Opcodes
 
+private object ClassfileMemberLineVisitor {
+  private val NoOpMethodVisitor: MethodVisitor = new MethodVisitor(
+    Opcodes.ASM9
+  ) {}
+}
+
 /**
  * Reads the first source line (from the bytecode `LineNumberTable`) of a method
  * named `memberName`. When `methodDescriptor` is given, only the overload with
@@ -22,6 +28,8 @@ private[decompile] final class ClassfileMemberLineVisitor(
     memberName: String,
     methodDescriptor: Option[String],
 ) extends ClassVisitor(Opcodes.ASM9) {
+  import ClassfileMemberLineVisitor._
+
   private var firstLine: Option[Int] = None
 
   /** The 1-based source line, if a `LineNumberTable` entry was found. */
@@ -33,15 +41,21 @@ private[decompile] final class ClassfileMemberLineVisitor(
       descriptor: String,
       signature: String,
       exceptions: Array[String],
-  ): MethodVisitor =
+  ): MethodVisitor = {
     if (
       name != memberName ||
       methodDescriptor.exists(_ != descriptor) ||
       firstLine.isDefined
-    ) null
-    else
+    ) {
+      NoOpMethodVisitor
+    } else {
       new MethodVisitor(Opcodes.ASM9) {
-        override def visitLineNumber(line: Int, start: Label): Unit =
-          if (firstLine.isEmpty) firstLine = Some(line)
+        override def visitLineNumber(line: Int, start: Label): Unit = {
+          if (firstLine.isEmpty) {
+            firstLine = Some(line)
+          }
+        }
       }
+    }
+  }
 }
