@@ -99,16 +99,16 @@ final class ClassfileHierarchyIndex(
   }
 
   /**
-   * Walks the type hierarchy from `seeds` upward via bytecode, returning a
-   * target for every class that declares a member named `memberName` (each
-   * method overload gets its own target, carrying its descriptor). Seeds and
-   * their ancestors may live in different jars.
+   * Walks the type hierarchy from `entryPoints` upward via bytecode, returning
+   * a target for every class that declares a member named `memberName` (each
+   * method overload gets its own target, carrying its descriptor). Entry
+   * points and their ancestors may live in different jars.
    */
   def hierarchyMemberTargets(
-      seeds: Seq[String],
+      entryPoints: Seq[String],
       memberName: String,
   ): Seq[HierarchyMemberTarget] =
-    walk(classpathSnapshot(), seeds.toList, memberName, Set.empty, Nil)
+    walk(classpathSnapshot(), entryPoints.toList, memberName, Set.empty, Nil)
       .distinctBy(target =>
         (
           target.memberSymbol,

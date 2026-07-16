@@ -65,7 +65,7 @@ class ClassfileHierarchyIndexSuite extends munit.FunSuite {
 
   test("walks-hierarchy-across-directory-entries") {
     // The member is declared on a compiled ancestor in a different directory,
-    // reached by following superName from the seed's directory.
+    // reached by following superName from the entry point's directory.
     val childDir = Files.createTempDirectory("child")
     val parentDir = Files.createTempDirectory("parent")
     writeClass(childDir, "com/example/Child", "com/example/Base", "childOnly")

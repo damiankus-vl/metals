@@ -44,8 +44,8 @@ private object SymbolNavigation {
  *   jars and class directories to search, re-read on every call since the
  *   workspace classpath can change.
  * @param protoJavaOutlineFor
- *   the synthesized proto outline declaring a class; its supertypes seed the
- *   walk when the owner isn't on the classpath.
+ *   the synthesized proto outline declaring a class; its supertypes become
+ *   the walk's entry points when the owner isn't on the classpath.
  * @param classSourceFile
  *   the workspace source file declaring a class, if it has one. When a member's
  *   declaring class is workspace source, the target points at that source at
@@ -78,7 +78,7 @@ final class ClassHierarchyTargetProvider(
         typeTargets(classSymbol)
       case Some(SymbolNavigation.AsMember(ownerSymbol, memberName)) =>
         val members = classfileHierarchyIndex
-          .hierarchyMemberTargets(seedClasses(ownerSymbol), memberName)
+          .hierarchyMemberTargets(entryPointClasses(ownerSymbol), memberName)
           .map(target =>
             target.memberSymbol -> preferSource(target, memberName)
           )
@@ -244,7 +244,7 @@ final class ClassHierarchyTargetProvider(
    * empty for Java files (the only files that reach this path) and it can't see
    * synthesized outlines anyway.
    */
-  private def seedClasses(ownerSymbol: String): Seq[String] = {
+  private def entryPointClasses(ownerSymbol: String): Seq[String] = {
     val result =
       if (classfileHierarchyIndex.readClassFile(ownerSymbol).isDefined)
         Seq(ownerSymbol)

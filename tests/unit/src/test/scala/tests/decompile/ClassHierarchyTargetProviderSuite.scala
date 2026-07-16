@@ -100,11 +100,11 @@ class ClassHierarchyTargetProviderSuite extends munit.FunSuite {
     )
   }
 
-  test("seeds-from-proto-outline-ignoring-comment-decoys") {
-    // The owner isn't on the classpath, so the walk seeds from its synthesized
-    // outline's supertypes. A doc comment mentions "class Foo" before the real
-    // declaration; the scan must skip the comment and read the true `extends`,
-    // otherwise the inherited member is unreachable.
+  test("entry-point-from-proto-outline-ignoring-comment-decoys") {
+    // The owner isn't on the classpath, so the walk's entry point comes from
+    // its synthesized outline's supertypes. A doc comment mentions "class Foo"
+    // before the real declaration; the scan must skip the comment and read the
+    // true `extends`, otherwise the inherited member is unreachable.
     val classDir = Files.createTempDirectory("classdir")
     writeClass(classDir, "com/example/Base", "getValue", sourceLine = 5)
 
