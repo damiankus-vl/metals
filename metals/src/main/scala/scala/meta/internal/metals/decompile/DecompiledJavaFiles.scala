@@ -38,8 +38,7 @@ object DecompiledJavaFiles {
    * followed by the class's own package and JVM binary name, and returns it.
    * Keying by the decompiled class's own name (rather than the symbol that
    * triggered navigation) means the file always matches what was actually
-   * decompiled, even when that's a nested class decompiled in isolation
-   * (`Outer$Inner`, not `Outer`).
+   * decompiled.
    *
    * `None` when `pathClass` isn't inside a recognized classpath entry (a
    * jar, or one of `classDirectories`), in which case the caller should keep
@@ -79,6 +78,21 @@ object DecompiledJavaFiles {
         .headOption
         .filterNot(_ == classDirectoryMarker)
     }
+
+  /**
+   * `Outer$Inner` -> `Outer`; a top-level class path (no `$` in its file
+   * name) is returned unchanged. Used by
+   * [[scala.meta.internal.metals.Compilers.decompileAndLocate]] to redirect
+   * away from decompiling a nested class in isolation: CFR has no way to see
+   * the enclosing context for an isolated nested class, so it labels the
+   * declaration `class Outer.Inner` -- not valid Java. Decompiling the whole
+   * enclosing class instead makes CFR emit valid, correctly-nested Java.
+   */
+  def topLevelClassPath(pathClass: AbsolutePath): AbsolutePath = {
+    val dollar = pathClass.filename.indexOf('$')
+    if (dollar < 0) pathClass
+    else pathClass.parent.resolve(pathClass.filename.take(dollar))
+  }
 
   private def root(workspace: AbsolutePath): AbsolutePath =
     workspace.resolve(Directories.dependencies).resolve(rootDirName)

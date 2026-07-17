@@ -6,12 +6,12 @@ import org.eclipse.{lsp4j => l}
 
 /**
  * Locates a class/interface/enum declaration by its symbol's simple name via
- * plain text search over decompiled source. Backs the fallback in
- * [[scala.meta.internal.metals.Compilers.decompileAndLocate]] for a nested
- * classpath type CFR decompiled in isolation from its enclosing class: CFR
- * labels the declaration `class Outer.Inner`, which is not valid Java, so the
- * usual mtags-based occurrence search (which requires parseable source)
- * never finds a matching definition.
+ * plain text search over decompiled source. Backs a defensive fallback in
+ * [[scala.meta.internal.metals.Compilers.decompileAndLocate]], which always
+ * decompiles a nested classpath type's *enclosing* top-level class (never
+ * the nested class in isolation) so CFR renders valid Java; this only
+ * matters if CFR still emits something mtags' occurrence search (which
+ * requires parseable source) can't index.
  */
 object DecompiledDeclarationSearch {
 

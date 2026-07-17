@@ -46,12 +46,12 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
   }
 
   test("keys a nested class decompiled in isolation by its own binary name") {
-    // NavigationTargetProvider decompiles the *enclosing* class as a whole
-    // whenever it can, but the presentation compiler's own definition
-    // resolution can still hand back an isolated nested class's `.class`
-    // location directly; the materialized file must then be named after
-    // that nested class (`Outer$Inner`), not the enclosing one, so it never
-    // collides with (or is overwritten by) the enclosing class's own file.
+    // Compilers.decompileAndLocate always redirects to the enclosing
+    // top-level class before calling materialize, so this shouldn't happen
+    // in practice -- but materialize itself takes whatever `pathClass` it's
+    // given, so a nested class's file must still be named after itself
+    // (`Outer$Inner`), not the enclosing one, so it never collides with (or
+    // is overwritten by) the enclosing class's own file.
     val jar = emptyJar()
     val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
     val pathClass = AbsolutePath(fs.getPath("/com/example/Outer$Inner"))
@@ -156,6 +156,51 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     assertEquals(
       DecompiledJavaFiles.jarFileNameOf(ws, ws.resolve("Foo.java")),
       None,
+    )
+  }
+
+  test("topLevelClassPath redirects a nested class to its enclosing class") {
+    val jar = emptyJar()
+    val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
+    val nested = AbsolutePath(fs.getPath("/com/example/Outer$Inner"))
+
+    assertEquals(
+      DecompiledJavaFiles.topLevelClassPath(nested),
+      AbsolutePath(fs.getPath("/com/example/Outer")),
+    )
+  }
+
+  test(
+    "topLevelClassPath redirects a doubly-nested class to its top-level enclosing class"
+  ) {
+    val jar = emptyJar()
+    val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
+    val nested = AbsolutePath(fs.getPath("/com/example/Outer$Middle$Inner"))
+
+    assertEquals(
+      DecompiledJavaFiles.topLevelClassPath(nested),
+      AbsolutePath(fs.getPath("/com/example/Outer")),
+    )
+  }
+
+  test("topLevelClassPath leaves a top-level class path unchanged") {
+    val jar = emptyJar()
+    val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
+    val topLevel = AbsolutePath(fs.getPath("/com/example/Outer"))
+
+    assertEquals(DecompiledJavaFiles.topLevelClassPath(topLevel), topLevel)
+  }
+
+  test("topLevelClassPath also redirects a class-directory entry") {
+    val classDir = AbsolutePath(Files.createTempDirectory("classdir"))
+    val nested = classDir
+      .resolve("com")
+      .resolve("example")
+      .resolve("Outer$Inner")
+
+    assertEquals(
+      DecompiledJavaFiles.topLevelClassPath(nested),
+      classDir.resolve("com").resolve("example").resolve("Outer"),
     )
   }
 }

@@ -1565,7 +1565,10 @@ class Compilers(
     scribe.debug(s"locateInsideDecompiledJar: $symbol, $locations")
     val decoder = DecompileBytecode.cfr
     val uri = locations.head.getUri()
-    val pathClass = uri.stripSuffix(".class").toAbsolutePath
+    // See DecompiledJavaFiles.topLevelClassPath for why this is redirected.
+    val pathClass = DecompiledJavaFiles.topLevelClassPath(
+      uri.stripSuffix(".class").toAbsolutePath
+    )
     for {
       decompiledCode <- decoder.decompilePath(
         pathClass,
@@ -1608,12 +1611,14 @@ class Compilers(
             scribe.warn(
               s"No occurrences found for symbol $symbol in decompiled $pathClass"
             )
-            // CFR decompiling a nested class in isolation labels it
-            // `class Outer.Inner` -- not valid Java, so mtags never indexes a
-            // matching definition. Fall back to a text search for the
-            // declaration by the symbol's simple name; if that also comes up
-            // empty, return unchanged locations so we can at least open the
-            // file at the wrong position.
+            // Defensive fallback: `pathClass` above is always the enclosing
+            // top-level class now, so CFR should emit valid Java and this
+            // branch shouldn't be reachable for the reason it originally
+            // existed. Kept in case CFR produces some other declaration mtags
+            // can't parse; falls back to a text search for the declaration by
+            // the symbol's simple name, and to the unchanged locations if
+            // even that comes up empty, so we can at least open the file at
+            // the wrong position.
             DecompiledDeclarationSearch
               .declarationLocation(code, symbol, decompiledUri)
               .map(Seq(_))
