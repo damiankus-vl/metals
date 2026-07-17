@@ -191,6 +191,36 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     assertEquals(DecompiledJavaFiles.topLevelClassPath(topLevel), topLevel)
   }
 
+  test(
+    "topLevelClassPath leaves a top-level Scala object's own module class unchanged"
+  ) {
+    // A top-level Scala object's module class (e.g. `scala.Some$`) has a
+    // trailing `$`, but that's a module-class suffix, not a nesting
+    // separator -- it must not be mistaken for `Outer$Inner` and redirected
+    // to a same-named companion class (`Some`), which may not even exist.
+    val jar = emptyJar()
+    val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
+    val module = AbsolutePath(fs.getPath("/com/example/Some$"))
+
+    assertEquals(DecompiledJavaFiles.topLevelClassPath(module), module)
+  }
+
+  test(
+    "topLevelClassPath redirects a nested Scala object to its top-level enclosing class"
+  ) {
+    // `Outer$Inner$`: a nested object inside `Outer`. The trailing `$` is
+    // still a module-class suffix, but there's also a real `Outer`/`Inner`
+    // nesting separator earlier in the name that must still be found.
+    val jar = emptyJar()
+    val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
+    val nestedModule = AbsolutePath(fs.getPath("/com/example/Outer$Inner$"))
+
+    assertEquals(
+      DecompiledJavaFiles.topLevelClassPath(nestedModule),
+      AbsolutePath(fs.getPath("/com/example/Outer")),
+    )
+  }
+
   test("topLevelClassPath also redirects a class-directory entry") {
     val classDir = AbsolutePath(Files.createTempDirectory("classdir"))
     val nested = classDir

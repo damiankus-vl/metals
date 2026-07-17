@@ -80,8 +80,10 @@ object DecompiledJavaFiles {
     }
 
   /**
-   * `Outer$Inner` -> `Outer`; a top-level class path (no `$` in its file
-   * name) is returned unchanged. Used by
+   * `Outer$Inner` -> `Outer`; a top-level class path is returned unchanged,
+   * including a top-level Scala object's own module class (`Foo$` has a
+   * trailing `$`, but it's a module-class suffix, not a nesting separator --
+   * stripped first so it isn't mistaken for one). Used by
    * [[scala.meta.internal.metals.Compilers.decompileAndLocate]] to redirect
    * away from decompiling a nested class in isolation: CFR has no way to see
    * the enclosing context for an isolated nested class, so it labels the
@@ -89,11 +91,12 @@ object DecompiledJavaFiles {
    * enclosing class instead makes CFR emit valid, correctly-nested Java.
    */
   def topLevelClassPath(pathClass: AbsolutePath): AbsolutePath = {
-    val dollar = pathClass.filename.indexOf('$')
+    val withoutModuleSuffix = pathClass.filename.stripSuffix("$")
+    val dollar = withoutModuleSuffix.indexOf('$')
     if (dollar < 0) {
       pathClass
     } else {
-      pathClass.parent.resolve(pathClass.filename.take(dollar))
+      pathClass.parent.resolve(withoutModuleSuffix.take(dollar))
     }
   }
 
