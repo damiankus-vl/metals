@@ -32,6 +32,7 @@ import scala.meta.internal.metals.Compilers.PresentationCompilerKey
 import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.decompile.DecompileBytecode
 import scala.meta.internal.metals.decompile.DecompiledDeclarationSearch
+import scala.meta.internal.metals.decompile.DecompiledJavaFiles
 import scala.meta.internal.metals.decompile.NavigationTargetProvider
 import scala.meta.internal.metals.mbt.MbtBuild
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
@@ -1577,6 +1578,21 @@ class Compilers(
           Nil
         case Right(code) =>
           scribe.debug(s"Decompiled code length: ${code.length}")
+          // Materialized to a real `.java` file (rather than left at the
+          // `.class` URI) so that opening it reaches the ordinary fallback
+          // Java presentation compiler, letting goto-definition navigate
+          // further from inside decompiled code -- a `.class` URI reaches no
+          // presentation compiler at all. Falls back to the `.class` URI
+          // when `pathClass` isn't inside a recognized classpath entry.
+          val decompiledUri = DecompiledJavaFiles
+            .materialize(
+              workspace,
+              pathClass,
+              fallbackClasspaths.classDirectories().map(AbsolutePath(_)),
+              code,
+            )
+            .map(_.toURI.toString)
+            .getOrElse(uri)
           val index = mtags().index(
             Input.VirtualFile(s"$pathClass.java", code),
             m.dialects.Scala213,
@@ -1586,7 +1602,7 @@ class Compilers(
           )
           if (occurrences.nonEmpty)
             occurrences.map { occ =>
-              new l.Location(uri.toString, occ.range.get.toLsp)
+              new l.Location(decompiledUri, occ.range.get.toLsp)
             }.toSeq
           else {
             scribe.warn(
@@ -1599,7 +1615,7 @@ class Compilers(
             // empty, return unchanged locations so we can at least open the
             // file at the wrong position.
             DecompiledDeclarationSearch
-              .declarationLocation(code, symbol, uri.toString)
+              .declarationLocation(code, symbol, decompiledUri)
               .map(Seq(_))
               .getOrElse(locations)
           }
@@ -1705,6 +1721,7 @@ class Compilers(
       val target = buildTargets
         .inverseSources(path)
         .orElse(protoGeneratedJavaTarget(path))
+        .orElse(decompiledJavaTarget(path))
 
       target match {
         case None =>
@@ -1768,6 +1785,27 @@ class Compilers(
       }
     }
   }
+
+  /**
+   * A materialized decompiled Java file (see [[DecompiledJavaFiles]]) belongs
+   * to no build target either; route it to a build target that actually has
+   * the originating jar on its classpath, so navigation from inside it uses
+   * that target's real classpath instead of the bare fallback compiler --
+   * which isn't guaranteed to have that jar at all (unlike decompilation
+   * itself, which sees every workspace jar, see [[decompileAndLocate]]).
+   */
+  private def decompiledJavaTarget(
+      path: AbsolutePath
+  ): Option[BuildTargetIdentifier] =
+    DecompiledJavaFiles.jarFileNameOf(workspace, path).flatMap { jarFileName =>
+      buildTargets.allWorkspaceJars
+        .find(_.filename == jarFileName)
+        .flatMap { jar =>
+          buildTargets.allBuildTargetIds.find(id =>
+            buildTargets.targetJarClasspath(id).exists(_.contains(jar))
+          )
+        }
+    }
 
   def loadWorksheetCompiler(
       path: AbsolutePath

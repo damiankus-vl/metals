@@ -1711,11 +1711,16 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
       uris = locations.map(_.getUri())
       _ = assert(locations.nonEmpty, "expected a definition location")
       _ = assert(
+        // Decompiled code is materialized to a real `.java` file (rather
+        // than left at a `.class` URI, which reaches no presentation
+        // compiler at all), so that goto-definition can navigate further
+        // from inside it.
         locations.forall(loc =>
-          loc.getUri().endsWith(".class") &&
+          loc.getUri().endsWith(".java") &&
+            loc.getUri().contains("dependencies/decompiled") &&
             loc.getUri().contains("protobuf-java")
         ),
-        s"expected decompiled protobuf-java .class locations, got:\n${uris.mkString("\n")}",
+        s"expected materialized decompiled protobuf-java .java locations, got:\n${uris.mkString("\n")}",
       )
       // A line > 0 proves the member was located inside the decompiled source,
       // not the 0,0 class-file fallback.
@@ -1752,12 +1757,13 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
         s"expected declarations from at least two classes, got:\n${uris.mkString("\n")}",
       )
       // getUnknownFields is declared both on a concrete base class and on the
-      // MessageOrBuilder interface; both should be offered.
+      // MessageOrBuilder interface; both should be offered. Materialized to
+      // a real `.java` file rather than left at a `.class` URI (see above).
       _ = assert(
-        uris.exists(_.contains("MessageOrBuilder.class")) &&
+        uris.exists(_.contains("MessageOrBuilder.java")) &&
           uris.exists(uri =>
-            uri.contains("GeneratedMessage.class") ||
-              uri.contains("GeneratedMessageV3.class")
+            uri.contains("GeneratedMessage.java") ||
+              uri.contains("GeneratedMessageV3.java")
           ),
         s"expected both a GeneratedMessage base and MessageOrBuilder, got:\n${uris.mkString("\n")}",
       )

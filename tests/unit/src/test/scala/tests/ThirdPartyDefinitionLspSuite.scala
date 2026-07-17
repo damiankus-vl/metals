@@ -1,5 +1,10 @@
 package tests
 
+import java.net.URI
+import java.nio.charset.StandardCharsets
+import java.nio.file.Files
+import java.nio.file.Paths
+
 import scala.concurrent.Future
 
 import org.eclipse.lsp4j.MessageActionItem
@@ -111,18 +116,106 @@ class ThirdPartyDefinitionLspSuite
     } yield {
       assert(locations.nonEmpty, s"Expected definition location but got none")
       val loc = locations(0)
+      // Decompiled code is materialized to a real `.java` file (rather than
+      // left at a `.class` URI, which reaches no presentation compiler at
+      // all), so that goto-definition can navigate further from inside it.
       assert(
-        loc.getUri().endsWith(".class"),
-        s"Expected definition location to have a .class URI, instead got: ${loc}",
+        loc.getUri().endsWith(".java"),
+        s"Expected a materialized .java definition location, instead got: ${loc}",
       )
       assert(
-        loc.getUri().contains("args4j"),
-        s"Expected definition location to contain 'args4j', instead got: ${loc}",
+        loc
+          .getUri()
+          .contains(
+            "dependencies/decompiled/args4j-2.37.jar/org/kohsuke/args4j"
+          ),
+        s"Expected definition location under the decompiled dependency tree, instead got: ${loc}",
       )
       // it's important the location is not 0,0, which would mean it wasn't found in decompiled code
       assert(
         loc.getRange().getStart().getLine() > 0,
         s"Expected definition location to start on a line greater than 0, instead got: ${loc}",
+      )
+    }
+  }
+
+  test("navigate-further-from-decompiled-code") {
+    // The whole point of materializing decompiled code to a real .java file
+    // (rather than leaving it at a `.class` URI, which reaches no
+    // presentation compiler at all) is that goto-definition keeps working
+    // from *inside* it. Verify a second hop: from the materialized
+    // Starter.java (produced by navigating to it from workspace source),
+    // navigate to a type it references, java.lang.reflect.Method -- using
+    // the file's own real decompiled content, not a synthetic stand-in.
+    cleanWorkspace()
+    for {
+      _ <- initialize(
+        """|/metals.json
+           |{
+           |  "a": {
+           |    "libraryDependencies": [
+           |      "args4j:args4j:2.37"
+           |    ],
+           |    "skipSources": true
+           |  }
+           |}
+           |/a/src/main/scala/a/Main.scala
+           |package a
+           |import org.kohsuke.args4j.Starter
+           |object Main {
+           |  Starter.main(Array("--help"))
+           |}
+           |""".stripMargin
+      )
+      firstHop <- server.definition(
+        "a/src/main/scala/a/Main.scala",
+        """|package a
+           |import org.kohsuke.args4j.Sta@@rter
+           |object Main {
+           |  Starter.main(Array("--help"))
+           |}
+           |""".stripMargin,
+        workspace,
+      )
+      decompiledUri = {
+        assert(firstHop.nonEmpty, "expected a first-hop definition location")
+        val loc = firstHop.head
+        assert(
+          loc
+            .getUri()
+            .endsWith(
+              "dependencies/decompiled/args4j-2.37.jar/org/kohsuke/args4j/Starter.java"
+            ),
+          s"expected the materialized Starter.java, instead got: $loc",
+        )
+        loc.getUri()
+      }
+      queryWithMarker = {
+        val realContent = new String(
+          Files.readAllBytes(Paths.get(URI.create(decompiledUri))),
+          StandardCharsets.UTF_8,
+        )
+        val marked = realContent.replaceFirst("Method m;", "@@Method m;")
+        assert(
+          marked != realContent,
+          s"expected a 'Method m;' declaration in the real decompiled content:\n$realContent",
+        )
+        marked
+      }
+      secondHop <- server.definition(decompiledUri, queryWithMarker, workspace)
+    } yield {
+      assert(
+        secondHop.nonEmpty,
+        "expected goto-definition to work from inside decompiled code",
+      )
+      val loc = secondHop.head
+      assert(
+        loc.getUri().endsWith("java/lang/reflect/Method.java"),
+        s"expected navigating further to java.lang.reflect.Method, instead got: $loc",
+      )
+      assert(
+        loc.getRange().getStart().getLine() > 0,
+        s"expected a non-zero line, instead got: $loc",
       )
     }
   }
