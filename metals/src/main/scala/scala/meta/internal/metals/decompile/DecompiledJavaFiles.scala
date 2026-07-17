@@ -90,8 +90,11 @@ object DecompiledJavaFiles {
    */
   def topLevelClassPath(pathClass: AbsolutePath): AbsolutePath = {
     val dollar = pathClass.filename.indexOf('$')
-    if (dollar < 0) pathClass
-    else pathClass.parent.resolve(pathClass.filename.take(dollar))
+    if (dollar < 0) {
+      pathClass
+    } else {
+      pathClass.parent.resolve(pathClass.filename.take(dollar))
+    }
   }
 
   private def root(workspace: AbsolutePath): AbsolutePath =

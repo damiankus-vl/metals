@@ -402,12 +402,25 @@ final class NavigationTargetProvider(
     val scanner = new TreeScanner[ClassTree, Unit] {
       override def visitClass(node: ClassTree, p: Unit): ClassTree = {
         val matchedHere =
-          if (node.getSimpleName().contentEquals(simpleName)) node else null
+          if (node.getSimpleName().contentEquals(simpleName)) {
+            node
+          } else {
+            null
+          }
         val matchedInMember = super.visitClass(node, p)
-        if (matchedHere != null) matchedHere else matchedInMember
+        if (matchedHere != null) {
+          matchedHere
+        } else {
+          matchedInMember
+        }
       }
-      override def reduce(r1: ClassTree, r2: ClassTree): ClassTree =
-        if (r1 != null) r1 else r2
+      override def reduce(r1: ClassTree, r2: ClassTree): ClassTree = {
+        if (r1 != null) {
+          r1
+        } else {
+          r2
+        }
+      }
     }
     Option(scanner.scan(unit, ()))
   }
