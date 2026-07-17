@@ -178,8 +178,9 @@ class ThirdPartyDefinitionLspSuite
         workspace,
       )
       decompiledUri = {
-        assert(firstHop.nonEmpty, "expected a first-hop definition location")
-        val loc = firstHop.head
+        val loc = firstHop.headOption.getOrElse(
+          fail("expected a first-hop definition location")
+        )
         assert(
           loc
             .getUri()
@@ -204,11 +205,9 @@ class ThirdPartyDefinitionLspSuite
       }
       secondHop <- server.definition(decompiledUri, queryWithMarker, workspace)
     } yield {
-      assert(
-        secondHop.nonEmpty,
-        "expected goto-definition to work from inside decompiled code",
+      val loc = secondHop.headOption.getOrElse(
+        fail("expected goto-definition to work from inside decompiled code")
       )
-      val loc = secondHop.head
       assert(
         loc.getUri().endsWith("java/lang/reflect/Method.java"),
         s"expected navigating further to java.lang.reflect.Method, instead got: $loc",
@@ -263,10 +262,9 @@ class ThirdPartyDefinitionLspSuite
            |""".stripMargin,
         workspace,
       )
-      decompiledUri = {
-        assert(firstHop.nonEmpty, "expected a first-hop definition location")
-        firstHop.head.getUri()
-      }
+      decompiledUri = firstHop.headOption
+        .getOrElse(fail("expected a first-hop definition location"))
+        .getUri()
       queryWithMarker = {
         val realContent = new String(
           Files.readAllBytes(Paths.get(URI.create(decompiledUri))),
@@ -284,11 +282,11 @@ class ThirdPartyDefinitionLspSuite
       }
       secondHop <- server.definition(decompiledUri, queryWithMarker, workspace)
     } yield {
-      assert(
-        secondHop.nonEmpty,
-        "expected goto-definition to resolve another third-party type in the same jar",
+      val loc = secondHop.headOption.getOrElse(
+        fail(
+          "expected goto-definition to resolve another third-party type in the same jar"
+        )
       )
-      val loc = secondHop.head
       assert(
         loc
           .getUri()
