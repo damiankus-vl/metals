@@ -14,6 +14,7 @@ import scala.meta.internal.mtags.Mtags
 import scala.meta.internal.{semanticdb => s}
 
 import coursierapi.Dependency
+import tests.BuildInfoVersions
 import tests.Library
 
 class DecompiledDeclarationSearchSuite extends munit.FunSuite {
@@ -150,6 +151,69 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
     assert(
       occurrence.exists(_.range.exists(_.startLine > 0)),
       s"expected a definition occurrence for $symbol past line 0 in:\n$code",
+    )
+  }
+
+  test("finds a Scala object's module class, named with a trailing `$`") {
+    // A Scala object has no equivalent at the JVM level: it's compiled to a
+    // separate module class whose binary name carries a trailing `$` (here
+    // `Some$`), which is what CFR -- a Java decompiler with no notion of
+    // Scala objects -- actually renders (`public final class Some$ {`).
+    // Searching by the object symbol's simple name alone (`Some`) would never
+    // match that declaration.
+    val scalaLibrary =
+      Library.getScalaLibraryJarPath(BuildInfoVersions.scala213)
+
+    val decompiled = Await.result(
+      DecompileBytecode.cfr.decompile("scala.Some$", List(scalaLibrary)),
+      30.seconds,
+    )
+    val code = decompiled.getOrElse(fail(s"decompilation failed: $decompiled"))
+
+    assert(
+      code.contains("class Some$"),
+      s"expected CFR's `$$`-suffixed module class name, got:\n$code",
+    )
+
+    val location = DecompiledDeclarationSearch.declarationLocation(
+      code,
+      "scala/Some.",
+      "jar:file:///scala-library.jar!/scala/Some$.class",
+    )
+
+    assert(
+      location.isDefined,
+      s"expected a location to be found in decompiled code:\n$code",
+    )
+    assertEquals(
+      location.get.getRange.getStart.getLine,
+      code.linesIterator.indexWhere(_.contains("class Some$")),
+    )
+  }
+
+  test("still finds an ordinary Scala case class (no trailing `$`)") {
+    val scalaLibrary =
+      Library.getScalaLibraryJarPath(BuildInfoVersions.scala213)
+
+    val decompiled = Await.result(
+      DecompileBytecode.cfr.decompile("scala.Some", List(scalaLibrary)),
+      30.seconds,
+    )
+    val code = decompiled.getOrElse(fail(s"decompilation failed: $decompiled"))
+
+    val location = DecompiledDeclarationSearch.declarationLocation(
+      code,
+      "scala/Some#",
+      "jar:file:///scala-library.jar!/scala/Some.class",
+    )
+
+    assert(
+      location.isDefined,
+      s"expected a location to be found in decompiled code:\n$code",
+    )
+    assert(
+      location.get.getRange.getStart.getLine > 0,
+      s"expected a non-zero line, got: ${location.get}",
     )
   }
 }
