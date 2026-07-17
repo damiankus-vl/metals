@@ -184,13 +184,24 @@ class TurbineCompiler[T](
   }
 
   var result = TurbineCompiler.emptyResult
+  // The classpath actually bound into `result`, as of the last completed
+  // compile -- distinct from `classpath()`, which is what the *next* compile
+  // will use. `createFileManager` needs the former: filtering a jar out of a
+  // build target's own project classpath on the assumption that `result`
+  // already covers it (see [[createFileManager]]) is only correct once a
+  // compile binding that jar has actually run. Before the first compile (or
+  // for a jar added since the last one), `result` is `emptyResult` --
+  // `classpath()` alone can't tell the two situations apart.
+  @volatile private var lastCompiledClasspath: Set[Path] = Set.empty
   def doCompileNow(): TurbineCompileResult = {
+    val classpathSnapshot = classpath()
     result = TurbineCompiler.compileClassfiles(
       allCompilationUnits(),
       parseUnit,
-      classpath(),
+      classpathSnapshot,
       progressBars,
     )
+    lastCompiledClasspath = classpathSnapshot.toSet
     cleanup()
     // Clear deleted binary names after recompile - they are no longer in the compiled output
     deletedBinaryNames.clear()
@@ -261,7 +272,7 @@ class TurbineCompiler[T](
       underlying: StandardJavaFileManager,
       projectClasspathJars: ju.List[Path],
   ): JavaFileManager = {
-    val isGlobalClasspathEntry = this.classpath().toSet
+    val isGlobalClasspathEntry = lastCompiledClasspath
     val filteredProjectClasspath =
       projectClasspathJars.asScala.filter(file =>
         !isGlobalClasspathEntry(file) && TurbineCompiler.isJarFile(file)
