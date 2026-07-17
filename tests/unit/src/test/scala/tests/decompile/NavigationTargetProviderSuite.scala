@@ -204,10 +204,9 @@ class NavigationTargetProviderSuite extends munit.FunSuite {
     )
   }
 
-  test("entry-point-from-proto-outline-with-bracket-generics") {
-    // Square-bracket type arguments (Scala-style, e.g. `Base[String, Int]`)
-    // must not be mistaken for a second, comma-separated supertype the way a
-    // Java `<...>` generic already isn't.
+  test("entry-point-from-proto-outline-with-generic-supertype") {
+    // A comma inside a generic type argument list (e.g. `Base<String, Int>`)
+    // must not be mistaken for a second, comma-separated supertype.
     val classDir = Files.createTempDirectory("classdir")
     writeClass(classDir, "com/example/Base", "getValue", sourceLine = 5)
     writeClass(classDir, "com/example/Other", "getValue", sourceLine = 9)
@@ -215,7 +214,7 @@ class NavigationTargetProviderSuite extends munit.FunSuite {
     val outlineText =
       List(
         "package com.example;",
-        "public final class Foo extends com.example.Base[String, Int], com.example.Other {",
+        "public final class Foo extends com.example.Base<String, Integer> implements com.example.Other {",
         "}",
       ).mkString("\n")
     val outline = VirtualTextDocument(

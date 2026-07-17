@@ -1,15 +1,24 @@
 package scala.meta.internal.metals.decompile
 
-import java.util.regex.Pattern
+import java.net.URI
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 
+import scala.meta.internal.jpc.JavaMetalsCompiler
+import scala.meta.internal.metals.CompilerVirtualFileParams
 import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.mbt.VirtualTextDocument
 import scala.meta.internal.mtags.Symbol
 import scala.meta.io.AbsolutePath
 
+import com.sun.source.tree.ClassTree
+import com.sun.source.tree.CompilationUnitTree
+import com.sun.source.tree.IdentifierTree
+import com.sun.source.tree.MemberSelectTree
+import com.sun.source.tree.ParameterizedTypeTree
+import com.sun.source.tree.Tree
+import com.sun.source.util.TreeScanner
 import org.eclipse.{lsp4j => l}
 
 /**
@@ -344,93 +353,84 @@ final class NavigationTargetProvider(
       simpleName: String,
   ): Seq[String] = {
     val result =
-      classHeader(text, simpleName).toSeq.flatMap { header =>
-        (supertypesAfter(header, "extends") ++
-          supertypesAfter(header, "implements")).map(
-          fullyQualifiedNameToClassSymbol
+      classDeclaration(text, simpleName).toSeq.flatMap { classTree =>
+        val extendsClause = Option(classTree.getExtendsClause()).toSeq
+        // `.asScala` as an extension method resolves to `MetalsEnrichments`'s
+        // `XtensionJavaList`, which is also applicable to any `util.List[A]`
+        // but doesn't define `asScala` -- calling the stdlib converter
+        // directly sidesteps that shadowing.
+        val implementsClauses = scala.jdk.CollectionConverters
+          .ListHasAsScala(
+            classTree.getImplementsClause().asInstanceOf[java.util.List[Tree]]
+          )
+          .asScala
+          .toSeq
+        (extendsClause ++ implementsClauses).map(typeTreeToClassSymbol)
+      }
+    result
+  }
+
+  private val outlineUri = URI.create("file:///ProtoOutline.java")
+
+  /**
+   * The class/interface/enum declaration named `simpleName`, found anywhere in
+   * `text` (top-level or nested), parsed with javac's own parser rather than
+   * matched by regex. Unlike CFR's decompiled output (see
+   * [[DecompiledDeclarationSearch]]), a synthesized proto outline is real,
+   * compilable Java, so a proper parse handles generics, annotations, and
+   * comments for free instead of needing bespoke text scanning for each.
+   */
+  private def classDeclaration(
+      text: String,
+      simpleName: String,
+  ): Option[ClassTree] = {
+    val result =
+      for {
+        (_, unit) <- JavaMetalsCompiler.parse(
+          CompilerVirtualFileParams(outlineUri, text)
         )
-      }
+        classTree <- findClassBySimpleName(unit, simpleName)
+      } yield classTree
     result
   }
 
-  /**
-   * The declaration header of `class simpleName` — from just after the class
-   * name up to its opening `{` — or `None` when the class isn't declared.
-   * Comments are stripped first so a `class Name` inside a doc comment can't be
-   * mistaken for the declaration, and both `class` and the name are matched as
-   * whole tokens so neither a longer identifier (`classLoader`, `FooBar` for
-   * `Foo`) nor an annotation ahead of the keyword throws the scan off.
-   */
-  private def classHeader(text: String, simpleName: String): Option[String] = {
-    val withoutComments = stripComments(text)
-    val pattern =
-      raw"(?<![\w$$])class\s+${Pattern.quote(simpleName)}(?![\w$$])".r
-    val result =
-      pattern.findFirstMatchIn(withoutComments).map { classMatch =>
-        val afterName = withoutComments.substring(classMatch.end)
-        val brace = afterName.indexOf('{')
-        if (brace < 0) afterName else afterName.substring(0, brace)
+  /** Depth-first search over `unit`'s type declarations, including nested ones. */
+  private def findClassBySimpleName(
+      unit: CompilationUnitTree,
+      simpleName: String,
+  ): Option[ClassTree] = {
+    val scanner = new TreeScanner[ClassTree, Unit] {
+      override def visitClass(node: ClassTree, p: Unit): ClassTree = {
+        val matchedHere =
+          if (node.getSimpleName().contentEquals(simpleName)) node else null
+        val matchedInMember = super.visitClass(node, p)
+        if (matchedHere != null) matchedHere else matchedInMember
       }
-    result
+      override def reduce(r1: ClassTree, r2: ClassTree): ClassTree =
+        if (r1 != null) r1 else r2
+    }
+    Option(scanner.scan(unit, ()))
   }
 
-  private def stripComments(text: String): String = {
-    val withoutBlockComments = text.replaceAll("(?s)/\\*.*?\\*/", " ")
-    withoutBlockComments.replaceAll("//[^\\n]*", " ")
-  }
+  /** The class symbol of a type as written in an `extends`/`implements` clause. */
+  private def typeTreeToClassSymbol(tree: Tree): String =
+    fullyQualifiedNameToClassSymbol(qualifiedTypeName(tree))
 
-  /**
-   * The comma-separated type names following `keyword` (`extends`/`implements`)
-   * in a class header, stopping at the next such keyword. Generic arguments are
-   * kept intact ([[ancestors]]), and matching is whole-word so a name
-   * containing the keyword as a substring isn't misread.
-   */
-  private def supertypesAfter(header: String, keyword: String): Seq[String] = {
-    val pattern = raw"(?<![\w$$])${Pattern.quote(keyword)}(?![\w$$])\s+".r
-    val result =
-      pattern.findFirstMatchIn(header) match {
-        case None => Nil
-        case Some(keywordMatch) =>
-          val rest = header.substring(keywordMatch.end)
-          val stops =
-            Seq(rest.indexOf(" extends "), rest.indexOf(" implements "))
-              .filter(_ >= 0)
-          val end = if (stops.isEmpty) rest.length else stops.min
-          ancestors(rest.substring(0, end))
-            .map(_.trim)
-            .filter(_.nonEmpty)
-      }
-    result
-  }
-
-  /**
-   * Splits on commas that are not nested inside a generic type argument list, so
-   * `Foo<A, B>, Bar` (Java) and `Foo[A, B], Bar` (Scala) both yield `Foo<A, B>`/
-   * `Foo[A, B]` and `Bar` rather than four fragments.
-   */
-  private def ancestors(text: String): Seq[String] = {
-    val (parts, _, current) =
-      text.foldLeft((Vector.empty[String], 0, "")) {
-        case ((parts, depth, current), character @ ('<' | '[')) =>
-          (parts, depth + 1, current :+ character)
-        case ((parts, depth, current), character @ ('>' | ']')) =>
-          (parts, math.max(0, depth - 1), current :+ character)
-        case ((parts, depth, current), ',') if depth == 0 =>
-          (parts :+ current, depth, "")
-        case ((parts, depth, current), character) =>
-          (parts, depth, current :+ character)
-      }
-    parts :+ current
+  /** Strips generic type arguments structurally instead of via bracket-matching. */
+  private def qualifiedTypeName(tree: Tree): String = tree match {
+    case parameterized: ParameterizedTypeTree =>
+      qualifiedTypeName(parameterized.getType())
+    case memberSelect: MemberSelectTree =>
+      s"${qualifiedTypeName(memberSelect.getExpression())}.${memberSelect.getIdentifier()}"
+    case identifier: IdentifierTree =>
+      identifier.getName().toString()
+    case other => other.toString()
   }
 
   private def fullyQualifiedNameToClassSymbol(
       fullyQualifiedName: String
   ): String = {
-    val result =
-      fullyQualifiedName
-        .takeWhile(c => c != '<' && c != '[')
-        .trim
-        .replace('.', '/') + "#"
+    val result = fullyQualifiedName.replace('.', '/') + "#"
     result
   }
 }
