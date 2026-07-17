@@ -263,7 +263,16 @@ final class DefinitionProvider(
 
   private def isNavigableJvmClass(symbol: String): Boolean = {
     val sym = Symbol(symbol)
-    symbol.nonEmpty && sym.isGlobal && (sym.isType || sym.isMethod || sym.isTerm)
+    symbol.nonEmpty &&
+    sym.isGlobal &&
+    // A package-shaped symbol is included because the presentation compiler
+    // can misreport a nested classpath type's *enclosing class* itself as a
+    // package (seen for Bazel/MBT dependency classfiles missing InnerClasses
+    // linkage), so this is the only way such a click reaches the
+    // classpath-aware recovery in NavigationTargetProvider at all. A symbol
+    // that is genuinely a package resolves to no class file there and
+    // contributes no targets, so this is purely additive.
+    (sym.isType || sym.isMethod || sym.isTerm || sym.isPackage)
   }
 
   def definition(

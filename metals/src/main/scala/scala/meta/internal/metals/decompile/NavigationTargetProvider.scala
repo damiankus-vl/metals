@@ -71,8 +71,9 @@ final class NavigationTargetProvider(
    *    each declaration (ancestors may live in different jars).
    */
   def classHierarchyTargets(
-      symbol: String
+      rawSymbol: String
   ): Future[Seq[(String, l.Location)]] = Future {
+    val symbol = recoverNestedClassSymbol(rawSymbol)
     val result = classify(symbol) match {
       case Some(SymbolKind.Type(classSymbol)) =>
         typeTargets(classSymbol)
@@ -91,6 +92,56 @@ final class NavigationTargetProvider(
       case None => Nil
     }
     result
+  }
+
+  /**
+   * Recovers the package/nested-class split for a symbol whose segments are
+   * all `/`-joined, as if every enclosing class were a package -- either a
+   * nested type reported as `Owner/Nested#` (instead of `Owner#Nested#`), or
+   * the enclosing class itself misreported as a plain package (`Owner/`
+   * instead of `Owner#`). This shape doesn't come from this class -- it's
+   * what the presentation compiler itself reports when the classfile it read
+   * for a dependency type doesn't carry (or wasn't given) `InnerClasses`
+   * linkage back to its enclosing class, which happens for some dependency
+   * classes in Bazel/MBT workspaces (Turbine's header classpath). Rather than
+   * trust the reported split, probe the classpath at each growing prefix to
+   * find where a real top-level `.class` exists, and re-`#`-join everything
+   * from there on.
+   *
+   * A no-op when `symbol` already contains an internal `#` (assumed already
+   * correctly split), doesn't end in `#` or `/`, or doesn't resolve to any
+   * class file, so this is safe to apply unconditionally to every incoming
+   * symbol.
+   */
+  private def recoverNestedClassSymbol(symbol: String): String = {
+    if (symbol.endsWith("#") && !symbol.stripSuffix("#").contains("#"))
+      reconstructNestedClassPath(symbol.stripSuffix("#"), symbol)
+    else if (symbol.endsWith("/"))
+      reconstructNestedClassPath(symbol.stripSuffix("/"), symbol)
+    else symbol
+  }
+
+  private def reconstructNestedClassPath(
+      path: String,
+      fallback: String,
+  ): String = {
+    val segments = path.split('/').filter(_.nonEmpty)
+    // The smallest leading-segment count whose joined prefix is a real
+    // top-level class file -- everything before it is the package,
+    // everything from it on (join by `#`) is the nested-class chain.
+    val classStart =
+      (1 to segments.length).find { count =>
+        classFileHierarchyIndex
+          .readClassFile(segments.take(count).mkString("/") + "#")
+          .isDefined
+      }
+    classStart match {
+      case None => fallback
+      case Some(count) =>
+        val pkg = segments.take(count - 1).mkString("/")
+        val classes = segments.drop(count - 1).mkString("#") + "#"
+        if (pkg.isEmpty) classes else s"$pkg/$classes"
+    }
   }
 
   /**
@@ -200,13 +251,32 @@ final class NavigationTargetProvider(
     }
   }
 
+  /**
+   * Resolves against the enclosing top-level class's own `.class` file rather
+   * than `classSymbol`'s (possibly nested) one, so a nested type is
+   * decompiled as part of its whole enclosing class instead of in isolation.
+   * CFR only renders valid, correctly-nested Java when a nested class is
+   * decompiled together with its enclosing class; decompiled alone, it labels
+   * the class `Outer.Inner` (see [[DecompiledDeclarationSearch]]). Returning
+   * `classSymbol` unchanged alongside the enclosing class's location lets the
+   * caller's occurrence search in the decompiled source land on the nested
+   * class's own declaration line, matching how a nested proto-generated type
+   * is already navigated (one materialized file per top-level outline,
+   * landing on the nested message's line within it).
+   */
   private def typeTargets(classSymbol: String): Seq[(String, l.Location)] = {
     val result =
       classFileHierarchyIndex
-        .classFileLocation(classSymbol)
+        .classFileLocation(topLevelClassOf(classSymbol))
         .map(classSymbol -> _)
         .toList
     result
+  }
+
+  /** The enclosing top-level class of a symbol, e.g. `Outer#Inner#` -> `Outer#`. */
+  private def topLevelClassOf(classSymbol: String): String = {
+    val firstHash = classSymbol.indexOf('#')
+    if (firstHash < 0) classSymbol else classSymbol.substring(0, firstHash + 1)
   }
 
   /**

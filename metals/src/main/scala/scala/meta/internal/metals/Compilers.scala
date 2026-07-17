@@ -7,7 +7,8 @@ import java.time.Duration
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
-import java.util as ju
+import java.{util => ju}
+
 import scala.annotation.nowarn
 import scala.collection.concurrent.TrieMap
 import scala.concurrent.ExecutionContextExecutorService
@@ -15,7 +16,8 @@ import scala.concurrent.Future
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.duration.FiniteDuration
 import scala.util.control.NonFatal
-import scala.meta as m
+import scala.{meta => m}
+
 import scala.meta.infra.Event
 import scala.meta.infra.FeatureFlagProvider
 import scala.meta.infra.MonitoringClient
@@ -27,8 +29,9 @@ import scala.meta.internal.builds.SbtBuildTool
 import scala.meta.internal.metals.CompilerOffsetParamsUtils
 import scala.meta.internal.metals.CompilerRangeParamsUtils
 import scala.meta.internal.metals.Compilers.PresentationCompilerKey
-import scala.meta.internal.metals.MetalsEnrichments.*
+import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.decompile.DecompileBytecode
+import scala.meta.internal.metals.decompile.DecompiledDeclarationSearch
 import scala.meta.internal.metals.decompile.NavigationTargetProvider
 import scala.meta.internal.metals.mbt.MbtBuild
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
@@ -41,7 +44,7 @@ import scala.meta.internal.pc.PcSymbolInformation
 import scala.meta.internal.protopc.ProtoPresentationCompiler
 import scala.meta.internal.worksheets.WorksheetPcData
 import scala.meta.internal.worksheets.WorksheetProvider
-import scala.meta.internal.semanticdb as s
+import scala.meta.internal.{semanticdb => s}
 import scala.meta.io.AbsolutePath
 import scala.meta.pc.AutoImportsResult
 import scala.meta.pc.CancelToken
@@ -56,6 +59,7 @@ import scala.meta.pc.SemanticdbFileManager
 import scala.meta.pc.SymbolSearch
 import scala.meta.pc.SyntheticDecorationsParams
 import scala.meta.pc.VirtualFileParams
+
 import ch.epfl.scala.bsp4j.BuildTargetIdentifier
 import ch.epfl.scala.bsp4j.CompileReport
 import com.google.common.cache.CacheBuilder
@@ -81,13 +85,11 @@ import org.eclipse.lsp4j.SignatureHelp
 import org.eclipse.lsp4j.TextDocumentIdentifier
 import org.eclipse.lsp4j.TextDocumentPositionParams
 import org.eclipse.lsp4j.TextEdit
-import org.eclipse.lsp4j.jsonrpc.messages.Either as JEither
-import org.eclipse.lsp4j.Position as LspPosition
-import org.eclipse.lsp4j.Range as LspRange
-import org.eclipse.lsp4j.debug as d
-import org.eclipse.lsp4j as l
-
-import java.util.Optional
+import org.eclipse.lsp4j.jsonrpc.messages.{Either => JEither}
+import org.eclipse.lsp4j.{Position => LspPosition}
+import org.eclipse.lsp4j.{Range => LspRange}
+import org.eclipse.lsp4j.{debug => d}
+import org.eclipse.{lsp4j => l}
 
 /**
  * Manages lifecycle for presentation compilers in all build targets.
@@ -1582,16 +1584,25 @@ class Compilers(
           val occurrences = index.occurrences.filter(sym =>
             sym.role == s.SymbolOccurrence.Role.DEFINITION && sym.symbol == symbol
           )
-          if (occurrences.isEmpty) {
-            scribe.warn(
-              s"No occurrences found for symbol $symbol in decompiled $pathClass"
-            )
-            // return unchanged locations so we can at least open the file at the wrong position
-            locations
-          } else
+          if (occurrences.nonEmpty)
             occurrences.map { occ =>
               new l.Location(uri.toString, occ.range.get.toLsp)
             }.toSeq
+          else {
+            scribe.warn(
+              s"No occurrences found for symbol $symbol in decompiled $pathClass"
+            )
+            // CFR decompiling a nested class in isolation labels it
+            // `class Outer.Inner` -- not valid Java, so mtags never indexes a
+            // matching definition. Fall back to a text search for the
+            // declaration by the symbol's simple name; if that also comes up
+            // empty, return unchanged locations so we can at least open the
+            // file at the wrong position.
+            DecompiledDeclarationSearch
+              .declarationLocation(code, symbol, uri.toString)
+              .map(Seq(_))
+              .getOrElse(locations)
+          }
       }
     }
   }

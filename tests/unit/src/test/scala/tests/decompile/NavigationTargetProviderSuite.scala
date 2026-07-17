@@ -100,6 +100,70 @@ class NavigationTargetProviderSuite extends munit.FunSuite {
     )
   }
 
+  test("recovers a nested-class symbol reported as all-slash-joined") {
+    // The presentation compiler can report a nested dependency type's owner
+    // as a PackageElement rather than the enclosing class -- observed for
+    // Bazel/MBT dependency classes whose Turbine-served classfile doesn't
+    // carry the expected InnerClasses linkage -- which yields a symbol like
+    // `com/example/Outer/Inner#` instead of `com/example/Outer#Inner#`.
+    // classHierarchyTargets must still resolve it by probing the classpath.
+    val classDir = Files.createTempDirectory("classdir")
+    writeClass(classDir, "com/example/Outer", "getValue", sourceLine = 3)
+    writeClass(classDir, "com/example/Outer$Inner", "getValue", sourceLine = 5)
+
+    val provider =
+      new NavigationTargetProvider(
+        () => Iterator(AbsolutePath(classDir)),
+        _ => None,
+        _ => None,
+      )
+
+    val malformed = Await.result(
+      provider.classHierarchyTargets("com/example/Outer/Inner#"),
+      10.seconds,
+    )
+    assertEquals(malformed.map(_._1), List("com/example/Outer#Inner#"))
+    // Resolves to the *enclosing* class's own .class file (decompiled whole,
+    // with Inner correctly nested inside), not Inner's isolated .class file.
+    assert(
+      malformed.head._2.getUri().endsWith("com/example/Outer.class"),
+      s"expected the enclosing Outer .class location, got: ${malformed.head._2.getUri()}",
+    )
+
+    // A correctly-shaped symbol must resolve identically (no regression).
+    val wellFormed = Await.result(
+      provider.classHierarchyTargets("com/example/Outer#Inner#"),
+      10.seconds,
+    )
+    assertEquals(wellFormed.map(_._2.getUri()), malformed.map(_._2.getUri()))
+  }
+
+  test("recovers the enclosing class itself reported as a bare package") {
+    // The same underlying misreport can also surface on a click on the
+    // enclosing class itself: instead of the expected `Owner#`, the
+    // presentation compiler reports the plain package symbol `Owner/`, as if
+    // `Owner` were a package rather than a class.
+    val classDir = Files.createTempDirectory("classdir")
+    writeClass(classDir, "com/example/Outer", "getValue", sourceLine = 3)
+
+    val provider =
+      new NavigationTargetProvider(
+        () => Iterator(AbsolutePath(classDir)),
+        _ => None,
+        _ => None,
+      )
+
+    val targets = Await.result(
+      provider.classHierarchyTargets("com/example/Outer/"),
+      10.seconds,
+    )
+    assertEquals(targets.map(_._1), List("com/example/Outer#"))
+    assert(
+      targets.head._2.getUri().endsWith("com/example/Outer.class"),
+      s"expected the Outer .class location, got: ${targets.head._2.getUri()}",
+    )
+  }
+
   test("entry-point-from-proto-outline-ignoring-comment-decoys") {
     // The owner isn't on the classpath, so the walk's entry point comes from
     // its synthesized outline's supertypes. A doc comment mentions "class Foo"
