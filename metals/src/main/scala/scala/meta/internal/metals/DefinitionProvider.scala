@@ -112,23 +112,22 @@ final class DefinitionProvider(
       ) {
         compilers()
           .definition(params, token)
-          .map {
-            case res if res.isEmpty =>
+          .map { res =>
+            val hasProtoJavaLocation =
+              protobufDefinitions.hasProtoJavaLocation(res)
+            if (hasProtoJavaLocation) {
+              protobufDefinitions.handleProtoJavaDefinition(res)
+            } else if (res.isEmpty) {
               reportBuilder.setCompilerResult(res)
               Some(res)
-            case res =>
-              val hasProtoJavaLocation =
-                protobufDefinitions.hasProtoJavaLocation(res)
-              if (hasProtoJavaLocation) {
-                protobufDefinitions.handleProtoJavaDefinition(res)
-              } else {
-                val pathToDef = res.locations.asScala.head.getUri.toAbsolutePath
-                Some(
-                  res.copy(semanticdb =
-                    semanticdbs().textDocument(pathToDef).documentIncludingStale
-                  )
+            } else {
+              val pathToDef = res.locations.asScala.head.getUri.toAbsolutePath
+              Some(
+                res.copy(semanticdb =
+                  semanticdbs().textDocument(pathToDef).documentIncludingStale
                 )
-              }
+              )
+            }
           }
       } else {
         scribe.warn(
@@ -174,20 +173,102 @@ final class DefinitionProvider(
       else List(fromCompiler, fromSemanticDb, fromScalaDoc, fromFallback)
 
     for {
-      result <- strategies.foldLeft(Future.successful(DefinitionResult.empty)) {
-        case (acc, next) =>
-          acc.flatMap {
-            case res if res.isEmpty && !res.symbol.endsWith("/") =>
-              next().map(_.getOrElse(res))
-            case res => Future.successful(res)
-          }
+      resolved <- strategies.foldLeft(
+        Future.successful(DefinitionResult.empty)
+      ) { case (acc, next) =>
+        acc.flatMap {
+          case res if res.isEmpty && !res.symbol.endsWith("/") =>
+            next().map(_.getOrElse(res))
+          case res => Future.successful(res)
+        }
       }
+      result <- fallbackToDecompiledClasspath(path, resolved)
     } yield {
       reportBuilder
         .build(scalaVersionSelector)
         .foreach(r => rc.unsanitized().create(() => r))
       protobufDefinitions.enhanceWithProtobufDefinition(result)
     }
+  }
+
+  /**
+   * Falls back to the compiler classpath when goto-definition on a JVM
+   * library symbol (from Java or Scala) finds no source. Works from
+   * bytecode alone, so it applies regardless of the triggering language.
+   *
+   * In MBT/Bazel workspaces, where dependency source jars aren't indexed,
+   * this is the only way such symbols become navigable; elsewhere it only
+   * fires when nothing else resolved, so it's purely additive.
+   *
+   * Offers every declaring class for an inherited or overridden member (the
+   * client shows a picker). A `.class` target is decompiled to find the
+   * exact line, gated behind user consent in
+   * [[Compilers.locateInsideDecompiledJar]]; a workspace-source target needs
+   * no consent. A `.class` target is dropped if consent is declined or
+   * decompilation fails.
+   */
+  private def fallbackToDecompiledClasspath(
+      path: AbsolutePath,
+      result: DefinitionResult,
+  ): Future[DefinitionResult] = {
+    if (
+      result.isEmpty &&
+      isNavigableJvmClass(result.symbol) &&
+      path.isScalaOrJava
+    ) {
+      compilers().classHierarchyTargets(result.symbol).flatMap { targets =>
+        if (targets.isEmpty) Future.successful(result)
+        else
+          Future
+            .traverse(targets) { case (memberSymbol, location) =>
+              if (location.getUri().endsWith(".class"))
+                compilers()
+                  .locateInsideDecompiledJar(memberSymbol, Seq(location))
+                  .map(_.headOption)
+              else Future.successful(Some(location))
+            }
+            .map { located =>
+              val deduped = located.flatten.distinctBy(location =>
+                (
+                  location.getUri(),
+                  location.getRange().getStart().getLine(),
+                )
+              )
+              if (deduped.isEmpty) result
+              else {
+                // Record the destination only when unambiguous, so
+                // [[InteractiveSemanticdbs.didDefinition]] can associate the
+                // jump with a build target for later requests. Multiple
+                // picker entries have no single destination to record.
+                val destinations =
+                  deduped.map(_.getUri().toAbsolutePath).toSet
+                val definition =
+                  if (destinations.size == 1) Some(destinations.head) else None
+                DefinitionResult(
+                  deduped.asJava,
+                  result.symbol,
+                  definition,
+                  None,
+                  result.querySymbol,
+                )
+              }
+            }
+      }
+    } else Future.successful(result)
+  }
+
+  private def isNavigableJvmClass(symbol: String): Boolean = {
+    val sym = Symbol(symbol)
+    symbol.nonEmpty &&
+    sym.isGlobal &&
+    // Package-shaped symbols are included too: the presentation compiler can
+    // misreport a nested type's enclosing class as a package when Bazel/MBT
+    // classfiles lack InnerClasses linkage, and this is the only way such a
+    // click reaches
+    // [[scala.meta.internal.metals.decompile.NavigationTargetProvider]]'s
+    // classpath recovery. A genuine package just resolves to no class file,
+    // so it's harmless.
+    (sym.isType || sym.isPackage)
   }
 
   def definition(

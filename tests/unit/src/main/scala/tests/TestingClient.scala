@@ -17,6 +17,7 @@ import scala.meta.internal.builds.BuildTools
 import scala.meta.internal.metals.Buffers
 import scala.meta.internal.metals.ClientCommands
 import scala.meta.internal.metals.Debug
+import scala.meta.internal.metals.DecompilationConsent
 import scala.meta.internal.metals.FileOutOfScalaCliBspScope
 import scala.meta.internal.metals.Icons
 import scala.meta.internal.metals.Messages._
@@ -463,6 +464,16 @@ class TestingClient(workspace: AbsolutePath, val buffers: Buffers)
               .exists(_.getTitle() == ChooseBuildServer.mbt.getTitle())
           ) {
             selectedServer
+          } else if (
+            params.getMessage().startsWith("Metals is about to decompile")
+          ) {
+            // Auto-grant consent; suites testing the prompt itself override
+            // showMessageRequestHandler.
+            params
+              .getActions()
+              .asScala
+              .find(_.getTitle() == DecompilationConsent.allowThisSessionTitle)
+              .orNull
           } else if (ResetWorkspace.params() == params) {
             resetWorkspace
           } else if (OldBloopVersionRunning.params() == params) {

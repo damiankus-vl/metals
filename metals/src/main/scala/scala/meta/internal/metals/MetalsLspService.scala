@@ -182,6 +182,9 @@ abstract class MetalsLspService(
 
   val tables: Tables = register(new Tables(folder, time))
 
+  val decompilationConsent: DecompilationConsent =
+    new DecompilationConsent(languageClient, tables)
+
   protected val mainBuildTargetsData = new TargetData
 
   val buildTargets: BuildTargets =
@@ -570,6 +573,7 @@ abstract class MetalsLspService(
       featureFlags,
       () => mbtBuild,
       mbt2,
+      decompilationConsent,
     )
   )
 

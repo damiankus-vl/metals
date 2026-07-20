@@ -31,6 +31,9 @@ import scala.meta.internal.metals.CompilerRangeParamsUtils
 import scala.meta.internal.metals.Compilers.PresentationCompilerKey
 import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.decompile.DecompileBytecode
+import scala.meta.internal.metals.decompile.DecompiledDeclarationSearch
+import scala.meta.internal.metals.decompile.DecompiledJavaFiles
+import scala.meta.internal.metals.decompile.NavigationTargetProvider
 import scala.meta.internal.metals.mbt.MbtBuild
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
 import scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles
@@ -125,6 +128,7 @@ class Compilers(
     featureFlags: FeatureFlagProvider,
     mbtBuild: () => MbtBuild,
     mbtWorkspaceSymbolProvider: MbtWorkspaceSymbolProvider,
+    decompilationConsent: DecompilationConsent,
 )(implicit ec: ExecutionContextExecutorService, rc: ReportContext)
     extends Cancelable {
 
@@ -1542,12 +1546,27 @@ class Compilers(
       locations: Seq[l.Location],
   ): Future[Seq[l.Location]] = {
     if (locations.isEmpty || !locations.head.getUri().endsWith(".class"))
-      return Future.successful(Nil)
+      Future.successful(Nil)
+    else
+      // Actual decompilation needs user consent (prompted at most once per
+      // session), unlike merely locating the `.class` file.
+      decompilationConsent.ensureConsent().flatMap {
+        case false => Future.successful(Nil)
+        case true => decompileAndLocate(symbol, locations)
+      }
+  }
 
+  private def decompileAndLocate(
+      symbol: String,
+      locations: Seq[l.Location],
+  ): Future[Seq[l.Location]] = {
     scribe.debug(s"locateInsideDecompiledJar: $symbol, $locations")
     val decoder = DecompileBytecode.cfr
     val uri = locations.head.getUri()
-    val pathClass = uri.stripSuffix(".class").toAbsolutePath
+    // See [[DecompiledJavaFiles.topLevelClassPath]] for why this is redirected.
+    val pathClass = DecompiledJavaFiles.topLevelClassPath(
+      uri.stripSuffix(".class").toAbsolutePath
+    )
     for {
       decompiledCode <- decoder.decompilePath(
         pathClass,
@@ -1560,6 +1579,14 @@ class Compilers(
           Nil
         case Right(code) =>
           scribe.debug(s"Decompiled code length: ${code.length}")
+          // Materialized to a real `.java` file, since a `.class` URI reaches
+          // no presentation compiler -- this lets goto-definition keep
+          // working from inside decompiled code. Falls back to the `.class`
+          // URI if `pathClass` isn't inside a recognized classpath entry.
+          val decompiledUri = DecompiledJavaFiles
+            .materialize(workspace, pathClass, code)
+            .map(_.toURI.toString)
+            .getOrElse(uri)
           val index = mtags().index(
             Input.VirtualFile(s"$pathClass.java", code),
             m.dialects.Scala213,
@@ -1567,20 +1594,44 @@ class Compilers(
           val occurrences = index.occurrences.filter(sym =>
             sym.role == s.SymbolOccurrence.Role.DEFINITION && sym.symbol == symbol
           )
-          if (occurrences.isEmpty) {
+          if (occurrences.nonEmpty)
+            occurrences.map { occ =>
+              new l.Location(decompiledUri, occ.range.get.toLsp)
+            }.toSeq
+          else {
             scribe.warn(
               s"No occurrences found for symbol $symbol in decompiled $pathClass"
             )
-            // return unchanged locations so we can at least open the file at the wrong position
-            locations
-          } else
-            occurrences.map { occ =>
-              new l.Location(uri.toString, occ.range.get.toLsp)
-            }.toSeq
+            // Shouldn't normally happen now that `pathClass` is always the
+            // top-level class, but kept as a defensive fallback in case CFR
+            // emits something mtags can't parse: try a text search by the
+            // symbol's simple name, else fall back to the unchanged
+            // locations so the file at least opens at the wrong position.
+            DecompiledDeclarationSearch
+              .declarationLocation(code, symbol, decompiledUri)
+              .map(Seq(_))
+              .getOrElse(locations)
+          }
       }
     }
-
   }
+
+  /**
+   * Definition targets for a JVM library symbol that the presentation
+   * compiler resolved but left without a source location. See
+   * [[scala.meta.internal.metals.decompile.NavigationTargetProvider]].
+   */
+  def classHierarchyTargets(
+      symbol: String
+  ): Future[Seq[(String, l.Location)]] =
+    classHierarchyTargetProvider.classHierarchyTargets(symbol)
+
+  private val classHierarchyTargetProvider =
+    new NavigationTargetProvider(
+      () =>
+        buildTargets.allWorkspaceJars ++
+          fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_))
+    )
 
   def signatureHelp(
       params: TextDocumentPositionParams,
@@ -1651,6 +1702,7 @@ class Compilers(
       val target = buildTargets
         .inverseSources(path)
         .orElse(protoGeneratedJavaTarget(path))
+        .orElse(decompiledJavaTarget(path))
 
       target match {
         case None =>
@@ -1658,9 +1710,9 @@ class Compilers(
           val scalaVersion =
             scalaVersionSelector.fallbackScalaVersion()
           if (
-            !path.toNIO.startsWith(tmpDirectory.toNIO)
+            !path.toNIO.startsWith(tmpDirectory.toNIO) &&
             // don't spam the log with the same message about the same file
-            && !lastPathWithFallbackCompiler.contains(path)
+            !lastPathWithFallbackCompiler.contains(path)
           ) {
             scribe.debug(
               s"no build target found for $path, try syncing the file for full IDE support." +
@@ -1714,6 +1766,27 @@ class Compilers(
       }
     }
   }
+
+  /**
+   * A materialized decompiled Java file (see [[DecompiledJavaFiles]]) belongs
+   * to no build target; route it to one that has the originating jar on its
+   * classpath, so navigation from inside it can resolve symbols instead of
+   * falling back to the bare fallback compiler, which isn't guaranteed to
+   * have that jar (unlike [[decompileAndLocate]], which sees every
+   * workspace jar).
+   */
+  private def decompiledJavaTarget(
+      path: AbsolutePath
+  ): Option[BuildTargetIdentifier] =
+    DecompiledJavaFiles.jarFileNameOf(workspace, path).flatMap { jarFileName =>
+      buildTargets.allWorkspaceJars
+        .find(_.filename == jarFileName)
+        .flatMap { jar =>
+          buildTargets.allBuildTargetIds.find(id =>
+            buildTargets.targetJarClasspath(id).exists(_.contains(jar))
+          )
+        }
+    }
 
   def loadWorksheetCompiler(
       path: AbsolutePath

@@ -183,19 +183,23 @@ class TurbineCompiler[T](
     )
   }
 
-  var result = TurbineCompiler.emptyResult
+  @volatile private var state =
+    CompileState(TurbineCompiler.emptyResult, Set.empty)
+  def result: TurbineCompileResult = state.result
   def doCompileNow(): TurbineCompileResult = {
-    result = TurbineCompiler.compileClassfiles(
+    val classpathSnapshot = classpath()
+    val compiled = TurbineCompiler.compileClassfiles(
       allCompilationUnits(),
       parseUnit,
-      classpath(),
+      classpathSnapshot,
       progressBars,
     )
+    state = CompileState(compiled, classpathSnapshot.toSet)
     cleanup()
     // Clear deleted binary names after recompile - they are no longer in the compiled output
     deletedBinaryNames.clear()
     onIndexingDone()
-    result
+    compiled
   }
 
   /**
@@ -261,7 +265,7 @@ class TurbineCompiler[T](
       underlying: StandardJavaFileManager,
       projectClasspathJars: ju.List[Path],
   ): JavaFileManager = {
-    val isGlobalClasspathEntry = this.classpath().toSet
+    val isGlobalClasspathEntry = state.compiledClasspath
     val filteredProjectClasspath =
       projectClasspathJars.asScala.filter(file =>
         !isGlobalClasspathEntry(file) && TurbineCompiler.isJarFile(file)
