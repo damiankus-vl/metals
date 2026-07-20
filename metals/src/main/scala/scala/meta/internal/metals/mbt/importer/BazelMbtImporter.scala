@@ -97,9 +97,16 @@ abstract class BazelMbtImporter(
             .exists(isRunnableRule)
         )
         .toSet
-      classDirectories = classDirectoriesForRunTargets(
+      classJarTargets = targets
+        .filter(target =>
+          targetsXmlDump.ruleClassesByTarget
+            .get(target)
+            .exists(producesClassJar)
+        )
+        .toSet
+      classDirectories = classDirectoriesForTargets(
         bazelBin,
-        runTargets,
+        classJarTargets,
         targetsXmlDump.ruleOutputsByTarget,
       )
       targetSet = targets.toSet
@@ -167,14 +174,24 @@ abstract class BazelMbtImporter(
     ruleClass == "scala_binary" || ruleClass == "java_binary" ||
       ruleClass == "scala_test" || ruleClass == "java_test"
 
-  private def classDirectoriesForRunTargets(
+  /**
+   * Rules whose class jar should be recorded: runnable targets plus plain
+   * libraries. Libraries used to be excluded, hiding members that only exist
+   * in compiled output (e.g. Lombok-generated accessors) since the header
+   * compiler never produces them.
+   */
+  private def producesClassJar(ruleClass: String): Boolean =
+    isRunnableRule(ruleClass) ||
+      ruleClass == "java_library" || ruleClass == "scala_library"
+
+  private def classDirectoriesForTargets(
       bazelBin: Option[Path],
-      runTargets: Set[String],
+      targets: Set[String],
       ruleOutputsByTarget: Map[String, List[String]],
   ): Map[String, String] =
     bazelBin.toList.flatMap { bin =>
       for {
-        target <- runTargets.toList
+        target <- targets.toList
         output <- ruleOutputsByTarget
           .getOrElse(target, Nil)
           .find(isClassJarOutput)

@@ -157,7 +157,7 @@ case class MbtTarget(
       includeTests: Boolean = false,
   ): List[AbsolutePath] = {
     if (classDirectories.nonEmpty) {
-      classDirectories.distinct.map(resolveClassDir(workspace, _)).toList
+      resolvedClassDirectories(workspace).toList
     } else
       MbtTarget.conventionalClassDirectories(
         workspace,
@@ -183,6 +183,16 @@ case class MbtTarget(
           .head
       )
   }
+
+  /**
+   * Declared class output locations (jars or directories), resolved against
+   * the workspace. Unlike [[runClassDirectories]], doesn't fall back to
+   * conventional directories -- empty if nothing was declared.
+   */
+  def resolvedClassDirectories(
+      workspace: AbsolutePath
+  ): Seq[AbsolutePath] =
+    classDirectories.distinct.map(resolveClassDir(workspace, _))
 
   private def resolveClassDir(
       workspace: AbsolutePath,

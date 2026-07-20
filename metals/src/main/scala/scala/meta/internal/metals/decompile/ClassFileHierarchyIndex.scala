@@ -4,6 +4,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 
+import scala.annotation.tailrec
 import scala.util.control.NonFatal
 
 import scala.meta.internal.io.FileIO
@@ -11,10 +12,14 @@ import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.io.AbsolutePath
 
 import org.eclipse.{lsp4j => l}
+import org.objectweb.asm.ClassReader
 
 /**
- * Locates `.class` files for JVM symbols across classpath entries, without
- * decompiling.
+ * Locates `.class` files for JVM symbols across classpath entries and walks
+ * their compiled type hierarchy via ASM, without decompiling. Backs
+ * navigation to a member inherited from a compiled class: given the classes
+ * to start from, [[navigationTargets]] returns every declaring class, each
+ * possibly in a different entry.
  *
  * Entries can be jars or class directories. Classpath entries are supplied as
  * a function rather than a fixed collection because the workspace classpath
@@ -37,7 +42,8 @@ final class ClassFileHierarchyIndex(
 
   /**
    * Snapshot of the existing classpath entries, taken once per navigation so
-   * repeated lookups don't recompute the classpath every time.
+   * a hierarchy walk doesn't recompute the classpath for every class it
+   * visits.
    */
   private def classpathSnapshot(): Seq[AbsolutePath] =
     classpathEntries().filter(_.exists).toVector
@@ -85,11 +91,142 @@ final class ClassFileHierarchyIndex(
     )
   }
 
+  /**
+   * Walks the type hierarchy upward from `entryPoints` via bytecode,
+   * returning a target for every class that declares `memberName` — each
+   * method overload gets its own target, carrying its descriptor. Entry
+   * points and their ancestors may live in different jars.
+   */
+  def navigationTargets(
+      entryPoints: Seq[String],
+      memberName: String,
+  ): Seq[NavigationTarget] =
+    walk(classpathSnapshot(), entryPoints.toList, memberName, Set.empty, Nil)
+      .distinctBy(target =>
+        (
+          target.memberSymbol,
+          target.classLocation.getUri(),
+          target.methodDescriptor,
+        )
+      )
+
+  /**
+   * Breadth-first walk of the type hierarchy: for each class in `frontier`,
+   * record its targets for `memberName`, then continue into its supertypes.
+   * `visited` avoids revisiting a class reachable via multiple paths;
+   * `collectedTargets` accumulates in reverse discovery order.
+   */
+  @tailrec
+  private def walk(
+      entries: Seq[AbsolutePath],
+      frontier: List[String],
+      memberName: String,
+      visited: Set[String],
+      collectedTargets: List[NavigationTarget],
+  ): List[NavigationTarget] =
+    frontier match {
+      case Nil => collectedTargets.reverse
+      case current :: rest if visited(current) =>
+        walk(entries, rest, memberName, visited, collectedTargets)
+      case current :: rest =>
+        readClass(entries, current) match {
+          case None =>
+            walk(entries, rest, memberName, visited + current, collectedTargets)
+          case Some((uri, info)) =>
+            val found = memberNavigationTargets(current, memberName, uri, info)
+            val supertypes =
+              (info.superName ++ info.interfaces).map(internalNameToSymbol)
+            walk(
+              entries,
+              rest ++ supertypes,
+              memberName,
+              visited + current,
+              found reverse_::: collectedTargets,
+            )
+        }
+    }
+
+  /**
+   * Navigation targets contributed by a single class: one per overload of
+   * `memberName` (carrying its descriptor so the caller can resolve that
+   * overload's own source line), or one if it's a field. Empty if the class
+   * declares no such member.
+   */
+  private def memberNavigationTargets(
+      classSymbol: String,
+      memberName: String,
+      uri: String,
+      info: ClassFileInfo,
+  ): List[NavigationTarget] = {
+    val overloadDescriptors = info.methods.collect {
+      case MethodInfo(name, descriptor) if name == memberName => descriptor
+    }
+    if (overloadDescriptors.nonEmpty) {
+      overloadDescriptors.zipWithIndex.map { case (descriptor, index) =>
+        val disambiguator = if (index == 0) "()." else s"(+$index)."
+        NavigationTarget(
+          classSymbol + memberName + disambiguator,
+          classLocation(uri),
+          Some(descriptor),
+        )
+      }.toList
+    } else if (info.fields.contains(memberName)) {
+      List(
+        NavigationTarget(
+          classSymbol + memberName + ".",
+          classLocation(uri),
+          None,
+        )
+      )
+    } else {
+      Nil
+    }
+  }
+
+  /**
+   * The 1-based source line of `memberName` on `classSymbol`, read from the
+   * bytecode `LineNumberTable`. Used to jump to real source for a method that
+   * exists only in compiled output (e.g. a Lombok accessor), where the line
+   * points back at the annotated field. `methodDescriptor`, when given, picks
+   * out one overload, so overloads sharing a name resolve to their own line
+   * instead of all collapsing onto the first. `None` if the class isn't found
+   * or has no debug line info.
+   */
+  def memberSourceLine(
+      classSymbol: String,
+      memberName: String,
+      methodDescriptor: Option[String] = None,
+  ): Option[Int] =
+    readClassFile(classSymbol).flatMap { case (_, bytes) =>
+      val visitor =
+        new ClassFileMemberLineVisitor(memberName, methodDescriptor)
+      // No SKIP_CODE: line numbers live in the Code attribute.
+      new ClassReader(bytes).accept(visitor, ClassReader.SKIP_FRAMES)
+      visitor.line
+    }
+
+  private def readClass(
+      entries: Seq[AbsolutePath],
+      classSymbol: String,
+  ): Option[(String, ClassFileInfo)] =
+    readClassFileFrom(entries, classSymbol).map { case (uri, bytes) =>
+      val visitor = new ClassFileInfoVisitor
+      new ClassReader(bytes).accept(
+        visitor,
+        ClassReader.SKIP_CODE | ClassReader.SKIP_FRAMES,
+      )
+      uri -> visitor.result
+    }
+
   private def classLocation(uri: String): l.Location =
     new l.Location(
       uri,
       new l.Range(new l.Position(0, 0), new l.Position(0, 0)),
     )
+
+  /** `com/example/Outer$Inner` becomes `com/example/Outer#Inner#`. */
+  private def internalNameToSymbol(internalName: String): String =
+    internalName.replace('$', '#') + "#"
 
   /**
    * Converts a SemanticDB symbol into its `.class` entry path, mapping nested

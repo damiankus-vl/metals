@@ -28,26 +28,30 @@ import scala.meta.io.AbsolutePath
 object DecompiledJavaFiles {
 
   private val rootDirName = "decompiled"
+  private val classDirectoryMarker = "workspace-classes"
 
   /**
    * Writes `content` -- CFR's decompilation of the class denoted by
    * `pathClass` -- to a stable on-disk location keyed by the originating
-   * jar's filename plus the class's own package and JVM binary name, and
-   * returns it. Keying by the decompiled class's own name, rather than the
-   * symbol that triggered navigation, keeps the file matching what was
-   * actually decompiled.
+   * jar's filename (or [[classDirectoryMarker]] for a class-directory entry)
+   * plus the class's own package and JVM binary name, and returns it. Keying
+   * by the decompiled class's own name, rather than the symbol that
+   * triggered navigation, keeps the file matching what was actually
+   * decompiled.
    *
-   * `None` when `pathClass` isn't inside a jar; callers should then fall back
-   * to the unmaterialized `.class` location.
+   * `None` when `pathClass` isn't inside a recognized classpath entry (a
+   * jar, or one of `classDirectories`); callers should then fall back to the
+   * unmaterialized `.class` location.
    */
   def materialize(
       workspace: AbsolutePath,
       pathClass: AbsolutePath,
+      classDirectories: Seq[AbsolutePath],
       content: String,
   ): Option[AbsolutePath] =
-    origin(pathClass).map { case (jarFileName, segments) =>
+    origin(pathClass, classDirectories).map { case (marker, segments) =>
       val pkg = segments.init
-      val javaFile = (jarFileName +: pkg)
+      val javaFile = (marker +: pkg)
         .foldLeft(root(workspace))(_.resolve(_))
         .resolve(s"${segments.last}.java")
       writeIfChanged(javaFile, content)
@@ -57,14 +61,21 @@ object DecompiledJavaFiles {
   /**
    * The filename of the jar a materialized file (see [[materialize]]) was
    * decompiled from, recovered from its on-disk path. `None` if `path` isn't
-   * a materialized decompiled file.
+   * a materialized decompiled file, or came from a class directory rather
+   * than a jar.
    */
   def jarFileNameOf(
       workspace: AbsolutePath,
       path: AbsolutePath,
   ): Option[String] =
     path.toRelativeInside(root(workspace)).flatMap { rel =>
-      rel.toNIO.iterator().asScala.map(_.toString).toSeq.headOption
+      rel.toNIO
+        .iterator()
+        .asScala
+        .map(_.toString)
+        .toSeq
+        .headOption
+        .filterNot(_ == classDirectoryMarker)
     }
 
   /**
@@ -92,20 +103,28 @@ object DecompiledJavaFiles {
     workspace.resolve(Directories.dependencies).resolve(rootDirName)
 
   /**
-   * The originating jar's filename plus the package and JVM binary name of
-   * the class `pathClass` denotes (e.g. `List("com", "example",
-   * "Outer$Inner")`), read from its path rather than parsed from a symbol
-   * string. `None` if `pathClass` isn't inside a jar.
+   * The marker directory segment (an originating jar's filename, or
+   * [[classDirectoryMarker]]) plus the package and JVM binary name of the
+   * class `pathClass` denotes (e.g. `List("com", "example", "Outer$Inner")`),
+   * read from its path rather than parsed from a symbol string. A jar
+   * entry's path is already rooted at the jar, i.e. already the package
+   * path; a class-directory entry is made relative to whichever of
+   * `classDirectories` contains it. `None` if neither applies.
    */
   private def origin(
-      pathClass: AbsolutePath
+      pathClass: AbsolutePath,
+      classDirectories: Seq[AbsolutePath],
   ): Option[(String, Seq[String])] = {
     def segmentsOf(path: Path): Seq[String] =
       path.iterator().asScala.map(_.toString).toSeq
 
     if (pathClass.isJarFileSystem)
       pathClass.jarPath.map(jar => jar.filename -> segmentsOf(pathClass.toNIO))
-    else None
+    else
+      classDirectories.iterator
+        .flatMap(pathClass.toRelativeInside(_))
+        .nextOption()
+        .map(rel => classDirectoryMarker -> segmentsOf(rel.toNIO))
   }
 
   private def writeIfChanged(file: AbsolutePath, content: String): Unit = {

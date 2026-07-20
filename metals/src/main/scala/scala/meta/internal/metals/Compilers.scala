@@ -1584,7 +1584,12 @@ class Compilers(
           // working from inside decompiled code. Falls back to the `.class`
           // URI if `pathClass` isn't inside a recognized classpath entry.
           val decompiledUri = DecompiledJavaFiles
-            .materialize(workspace, pathClass, code)
+            .materialize(
+              workspace,
+              pathClass,
+              fallbackClasspaths.classDirectories().map(AbsolutePath(_)),
+              code,
+            )
             .map(_.toURI.toString)
             .getOrElse(uri)
           val index = mtags().index(
@@ -1630,8 +1635,20 @@ class Compilers(
     new NavigationTargetProvider(
       () =>
         buildTargets.allWorkspaceJars ++
-          fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_))
+          fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_)) ++
+          // Needed to reach members that exist only after compilation
+          // (e.g. Lombok-generated accessors).
+          fallbackClasspaths.classDirectories().map(AbsolutePath(_)),
+      mbtWorkspaceSymbolProvider.protoJavaOutlineFor(_),
+      classSourceFileOf,
     )
+
+  /** The workspace source file declaring `classSymbol`, if it has one. */
+  private def classSourceFileOf(classSymbol: String): Option[AbsolutePath] =
+    mbtWorkspaceSymbolProvider
+      .definition(classSymbol)
+      .map(_.getUri().toAbsolutePath)
+      .find(source => source.exists && source.isScalaOrJava)
 
   def signatureHelp(
       params: TextDocumentPositionParams,

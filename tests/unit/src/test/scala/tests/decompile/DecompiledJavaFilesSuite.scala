@@ -29,7 +29,7 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     val ws = workspace()
     val content = "package com.example;\npublic class Outer {\n}\n"
 
-    val result = DecompiledJavaFiles.materialize(ws, pathClass, content)
+    val result = DecompiledJavaFiles.materialize(ws, pathClass, Nil, content)
 
     assert(result.isDefined, "expected a materialized file")
     val javaFile = result.get
@@ -56,7 +56,7 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     val ws = workspace()
 
     val result =
-      DecompiledJavaFiles.materialize(ws, pathClass, "class Outer.Inner")
+      DecompiledJavaFiles.materialize(ws, pathClass, Nil, "class Outer.Inner")
 
     assert(result.isDefined)
     assert(
@@ -65,13 +65,40 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     )
   }
 
-  test("returns None when the class isn't inside a jar") {
+  test(
+    "a class-directory entry is keyed relative to its containing directory"
+  ) {
+    val classDir = AbsolutePath(Files.createTempDirectory("classdir"))
+    val pathClass = classDir.resolve("com").resolve("example").resolve("Outer")
+    val ws = workspace()
+
+    val result = DecompiledJavaFiles.materialize(
+      ws,
+      pathClass,
+      List(classDir),
+      "package com.example;\npublic class Outer {}\n",
+    )
+
+    assert(result.isDefined)
+    assert(
+      result.get.toString.endsWith(
+        s"decompiled${sep}workspace-classes${sep}com${sep}example${sep}Outer.java"
+      ),
+      s"unexpected materialized path: ${result.get}",
+    )
+  }
+
+  test(
+    "returns None when the class isn't inside a jar or any given directory"
+  ) {
     val outsideDir = AbsolutePath(Files.createTempDirectory("outside"))
     val pathClass =
       outsideDir.resolve("com").resolve("example").resolve("Outer")
+    val classDir = AbsolutePath(Files.createTempDirectory("classdir"))
     val ws = workspace()
 
-    val result = DecompiledJavaFiles.materialize(ws, pathClass, "code")
+    val result =
+      DecompiledJavaFiles.materialize(ws, pathClass, List(classDir), "code")
 
     assertEquals(result, None)
   }
@@ -83,11 +110,11 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     val ws = workspace()
     val content = "package com.example;\npublic class Outer {}\n"
 
-    val first = DecompiledJavaFiles.materialize(ws, pathClass, content).get
+    val first = DecompiledJavaFiles.materialize(ws, pathClass, Nil, content).get
     val firstModified = Files.getLastModifiedTime(first.toNIO)
     Thread.sleep(50)
     val second =
-      DecompiledJavaFiles.materialize(ws, pathClass, content).get
+      DecompiledJavaFiles.materialize(ws, pathClass, Nil, content).get
 
     assertEquals(first, second)
     assertEquals(Files.getLastModifiedTime(second.toNIO), firstModified)
@@ -100,12 +127,26 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     val ws = workspace()
 
     val javaFile =
-      DecompiledJavaFiles.materialize(ws, pathClass, "code").get
+      DecompiledJavaFiles.materialize(ws, pathClass, Nil, "code").get
 
     assertEquals(
       DecompiledJavaFiles.jarFileNameOf(ws, javaFile),
       Some("args4j-2.37.jar"),
     )
+  }
+
+  test(
+    "jarFileNameOf is None for a class-directory-sourced materialized file"
+  ) {
+    val classDir = AbsolutePath(Files.createTempDirectory("classdir"))
+    val pathClass = classDir.resolve("com").resolve("example").resolve("Outer")
+    val ws = workspace()
+
+    val javaFile = DecompiledJavaFiles
+      .materialize(ws, pathClass, List(classDir), "code")
+      .get
+
+    assertEquals(DecompiledJavaFiles.jarFileNameOf(ws, javaFile), None)
   }
 
   test("jarFileNameOf is None for a path outside the decompiled tree") {

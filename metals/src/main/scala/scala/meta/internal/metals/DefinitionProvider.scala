@@ -268,7 +268,7 @@ final class DefinitionProvider(
     // [[scala.meta.internal.metals.decompile.NavigationTargetProvider]]'s
     // classpath recovery. A genuine package just resolves to no class file,
     // so it's harmless.
-    (sym.isType || sym.isPackage)
+    (sym.isType || sym.isMethod || sym.isTerm || sym.isPackage)
   }
 
   def definition(

@@ -4,6 +4,9 @@ import java.nio.file.Files
 
 import scala.concurrent.Future
 
+import scala.meta.internal.jdk.CollectionConverters._
+import scala.meta.internal.metals.DecompilationConsent
+
 import org.eclipse.lsp4j.Location
 import tests.BuildInfoVersions
 
@@ -1688,6 +1691,117 @@ class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
       )
     } yield ()
   }
+
+  // Goto-definition on a member inherited from a compiled protobuf base class
+  // (no indexed source) decompiles the owning .class and lands on it.
+  test("java-navigates-to-inherited-compiled-member") {
+    cleanWorkspace()
+    proceedWithDecompilation()
+    val query = "session.getUnknownFi@@elds();"
+    for {
+      _ <- initialize(inheritedMemberLayout)
+      _ <- server.didOpen("a/src/main/proto/client.proto")
+      _ <- server.didOpen("a/src/main/java/com/example/Client.java")
+      _ <- server.didFocus("a/src/main/java/com/example/Client.java")
+      locations <- server.definitionSubstringQuery(
+        "a/src/main/java/com/example/Client.java",
+        query,
+      )
+      uris = locations.map(_.getUri())
+      _ = assert(locations.nonEmpty, "expected a definition location")
+      _ = assert(
+        // Decompiled code is materialized to a real `.java` file, not left
+        // at a `.class` URI (which no presentation compiler can open).
+        locations.forall(loc =>
+          loc.getUri().endsWith(".java") &&
+            loc.getUri().contains("dependencies/decompiled") &&
+            loc.getUri().contains("protobuf-java")
+        ),
+        s"expected materialized decompiled protobuf-java .java locations, got:\n${uris.mkString("\n")}",
+      )
+      // A line > 0 confirms the member was found in decompiled source, not
+      // the 0,0 class-file fallback.
+      _ = assert(
+        locations.exists(_.getRange().getStart().getLine() > 0),
+        s"expected the decompiled member line, got:\n${locations.mkString("\n")}",
+      )
+    } yield ()
+  }
+
+  // If the inherited member is declared at multiple levels of the hierarchy
+  // (e.g. GeneratedMessageV3 and MessageOrBuilder, possibly in different
+  // jars), every declaration is offered so the client can show a picker.
+  test("java-navigates-to-overridden-compiled-member") {
+    cleanWorkspace()
+    proceedWithDecompilation()
+    val query = "session.getUnknownFi@@elds();"
+    for {
+      _ <- initialize(inheritedMemberLayout)
+      _ <- server.didOpen("a/src/main/proto/client.proto")
+      _ <- server.didOpen("a/src/main/java/com/example/Client.java")
+      _ <- server.didFocus("a/src/main/java/com/example/Client.java")
+      locations <- server.definitionSubstringQuery(
+        "a/src/main/java/com/example/Client.java",
+        query,
+      )
+      uris = locations.map(_.getUri())
+      classFiles = uris
+        .map(uri => uri.substring(uri.lastIndexOf('/') + 1))
+        .distinct
+      _ = assert(
+        classFiles.sizeIs >= 2,
+        s"expected declarations from at least two classes, got:\n${uris.mkString("\n")}",
+      )
+      // getUnknownFields is declared on both a concrete base class and the
+      // MessageOrBuilder interface; both should be offered.
+      _ = assert(
+        uris.exists(_.contains("MessageOrBuilder.java")) &&
+          uris.exists(uri =>
+            uri.contains("GeneratedMessage.java") ||
+              uri.contains("GeneratedMessageV3.java")
+          ),
+        s"expected both a GeneratedMessage base and MessageOrBuilder, got:\n${uris.mkString("\n")}",
+      )
+    } yield ()
+  }
+
+  private val inheritedMemberLayout =
+    s"""|/metals.json
+        |{
+        |  "a": {
+        |    "libraryDependencies": [
+        |      "com.google.protobuf:protobuf-java:${BuildInfoVersions.protobufVersion}"
+        |    ],
+        |    "skipSources": true
+        |  }
+        |}
+        |/a/src/main/proto/client.proto
+        |syntax = "proto3";
+        |package com.example.api;
+        |option java_package = "com.example.api.jproto";
+        |option java_multiple_files = true;
+        |message Session {
+        |  string token = 1;
+        |}
+        |/a/src/main/java/com/example/Client.java
+        |package com.example;
+        |import com.example.api.jproto.Session;
+        |public class Client {
+        |  public void use(Session session) {
+        |    session.getUnknownFields();
+        |  }
+        |}
+        |""".stripMargin
+
+  private def proceedWithDecompilation(): Unit =
+    client.showMessageRequestHandler = { params =>
+      if (params.getMessage().startsWith("Metals is about to decompile"))
+        params
+          .getActions()
+          .asScala
+          .find(_.getTitle() == DecompilationConsent.allowThisSessionTitle)
+      else None
+    }
 
   // Hover and completion on a method whose return type is a proto-generated
   // class, accessed transitively from another Java file.

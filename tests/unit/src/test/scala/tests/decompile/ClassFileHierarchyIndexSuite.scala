@@ -1,0 +1,164 @@
+package tests.decompile
+
+import java.nio.file.Files
+import java.nio.file.Path
+
+import scala.meta.internal.metals.decompile.ClassFileHierarchyIndex
+import scala.meta.io.AbsolutePath
+
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Label
+import org.objectweb.asm.Opcodes
+
+class ClassFileHierarchyIndexSuite extends munit.FunSuite {
+
+  private def writeClass(
+      dir: Path,
+      internalName: String,
+      superName: String,
+      methodName: String,
+      sourceLine: Option[Int] = None,
+  ): Unit = {
+    val cw = new ClassWriter(0)
+    cw.visit(
+      Opcodes.V1_8,
+      Opcodes.ACC_PUBLIC,
+      internalName,
+      null,
+      superName,
+      null,
+    )
+    val mv = cw.visitMethod(Opcodes.ACC_PUBLIC, methodName, "()V", null, null)
+    sourceLine.foreach { line =>
+      mv.visitCode()
+      val label = new Label()
+      mv.visitLabel(label)
+      mv.visitLineNumber(line, label)
+      mv.visitInsn(Opcodes.RETURN)
+      mv.visitMaxs(0, 1)
+    }
+    mv.visitEnd()
+    cw.visitEnd()
+    val classFile = dir.resolve(s"$internalName.class")
+    Files.createDirectories(classFile.getParent)
+    Files.write(classFile, cw.toByteArray())
+  }
+
+  test("reads-class-and-member-from-directory") {
+    val dir = Files.createTempDirectory("classdir")
+    writeClass(dir, "com/example/Foo", "java/lang/Object", "bar")
+    val index = new ClassFileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
+
+    val targets = index.navigationTargets(Seq("com/example/Foo#"), "bar")
+    assertEquals(targets.map(_.memberSymbol), List("com/example/Foo#bar()."))
+
+    val location = index.classFileLocation("com/example/Foo#")
+    assert(
+      location.isDefined,
+      "expected a class-file location from a directory",
+    )
+    assert(
+      location.get.getUri().endsWith("com/example/Foo.class"),
+      s"unexpected uri: ${location.map(_.getUri())}",
+    )
+  }
+
+  test("walks-hierarchy-across-directory-entries") {
+    // Member lives on an ancestor in a different directory, reached by
+    // following superName from the entry point.
+    val childDir = Files.createTempDirectory("child")
+    val parentDir = Files.createTempDirectory("parent")
+    writeClass(childDir, "com/example/Child", "com/example/Base", "childOnly")
+    writeClass(parentDir, "com/example/Base", "java/lang/Object", "inherited")
+    val index =
+      new ClassFileHierarchyIndex(() =>
+        Iterator(AbsolutePath(childDir), AbsolutePath(parentDir))
+      )
+
+    val targets =
+      index.navigationTargets(Seq("com/example/Child#"), "inherited")
+    assertEquals(
+      targets.map(_.memberSymbol),
+      List("com/example/Base#inherited()."),
+    )
+  }
+
+  private def writeOverloadedClass(
+      dir: Path,
+      internalName: String,
+      methodName: String,
+      overloads: Seq[(String, Int)],
+  ): Unit = {
+    val cw = new ClassWriter(0)
+    cw.visit(
+      Opcodes.V1_8,
+      Opcodes.ACC_PUBLIC,
+      internalName,
+      null,
+      "java/lang/Object",
+      null,
+    )
+    for ((descriptor, sourceLine) <- overloads) {
+      val mv =
+        cw.visitMethod(Opcodes.ACC_PUBLIC, methodName, descriptor, null, null)
+      mv.visitCode()
+      val label = new Label()
+      mv.visitLabel(label)
+      mv.visitLineNumber(sourceLine, label)
+      mv.visitInsn(Opcodes.RETURN)
+      mv.visitMaxs(0, 2)
+      mv.visitEnd()
+    }
+    cw.visitEnd()
+    val classFile = dir.resolve(s"$internalName.class")
+    Files.createDirectories(classFile.getParent)
+    Files.write(classFile, cw.toByteArray())
+  }
+
+  test("overloads-resolve-their-own-source-line") {
+    // Overloads share a name but differ by descriptor; each must resolve to
+    // its own bytecode line, not just the first.
+    val dir = Files.createTempDirectory("overloaddir")
+    writeOverloadedClass(
+      dir,
+      "com/example/Setter",
+      "set",
+      Seq("(I)V" -> 10, "(Ljava/lang/String;)V" -> 20),
+    )
+    val index = new ClassFileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
+
+    val targets =
+      index.navigationTargets(Seq("com/example/Setter#"), "set")
+    assertEquals(
+      targets.map(_.memberSymbol),
+      List("com/example/Setter#set().", "com/example/Setter#set(+1)."),
+    )
+
+    val lines = targets.map(target =>
+      index.memberSourceLine(
+        "com/example/Setter#",
+        "set",
+        target.methodDescriptor,
+      )
+    )
+    assertEquals(lines, List(Some(10), Some(20)))
+  }
+
+  test("reads-member-source-line-from-bytecode") {
+    val dir = Files.createTempDirectory("linedir")
+    writeClass(
+      dir,
+      "com/example/Bean",
+      "java/lang/Object",
+      "getName",
+      sourceLine = Some(42),
+    )
+    val index = new ClassFileHierarchyIndex(() => Iterator(AbsolutePath(dir)))
+
+    assertEquals(
+      index.memberSourceLine("com/example/Bean#", "getName"),
+      Some(42),
+    )
+    assertEquals(index.memberSourceLine("com/example/Bean#", "absent"), None)
+  }
+}
