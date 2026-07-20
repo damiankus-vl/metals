@@ -159,6 +159,56 @@ class MbtWorkspaceSymbolProvider(
       .find(
         _.toplevelSymbols().asScala.exists(top => classSymbol.startsWith(top))
       )
+
+  /**
+   * Turbine's compiled bytecode (JVM binary name -> bytes) for every
+   * proto-generated class -- top-level and nested -- currently indexed,
+   * restricted to just the classes generated from `.proto` files (as opposed
+   * to every class turbine has header-compiled in the workspace). Used to
+   * expose these classes to the Scala presentation compiler's classpath,
+   * which -- unlike the Java presentation compiler -- has no notion of
+   * turbine's in-memory classes (see [[Compilers.withKeyAndDefault]]).
+   */
+  def protoGeneratedClassBytes(): Map[String, Array[Byte]] = {
+    if (!protobufWorkspace.isJavaPackageIndexingEnabled) Map.empty
+    else {
+      val topLevelBinaryNames =
+        documentsKeys.iterator
+          .filter(_.isProtoFilename)
+          .flatMap(protoJavaOutlines)
+          .flatMap(_.toplevelSymbols().asScala)
+          .map(_.stripSuffix("#").stripSuffix("."))
+          .toSet
+      if (topLevelBinaryNames.isEmpty) Map.empty
+      else
+        turbineCompiler.result.lowered
+          .bytes()
+          .asScala
+          .view
+          .filterKeys(binaryName =>
+            topLevelBinaryNames.exists(top =>
+              binaryName == top || binaryName.startsWith(s"$top$$")
+            )
+          )
+          .toMap
+    }
+  }
+
+  /**
+   * The directory proto-generated classes (see [[protoGeneratedClassBytes]])
+   * are materialized under, suitable for adding to a Scala build target's
+   * presentation-compiler classpath -- `None` when the turbine classpath
+   * loader isn't in use, or no proto-generated classes are currently known.
+   */
+  def protoGeneratedClassesDirectory(): Option[AbsolutePath] = {
+    if (!javaSymbolLoader().isTurbineClasspath) None
+    else {
+      val classes = protoGeneratedClassBytes()
+      if (classes.isEmpty) None
+      else Some(ProtoGeneratedClassFiles.materialize(workspace, classes))
+    }
+  }
+
   private val turbineCompiler: TurbineCompiler[AbsolutePath] =
     new TurbineCompiler[AbsolutePath](
       () => documentsKeys,

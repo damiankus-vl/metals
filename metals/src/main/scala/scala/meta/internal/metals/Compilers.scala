@@ -1980,6 +1980,10 @@ class Compilers(
                 search,
                 completionItemPriority(),
                 serverConfig.compilers.sourcePathMode,
+                additionalClasspath = mbtWorkspaceSymbolProvider
+                  .protoGeneratedClassesDirectory()
+                  .map(_.toNIO)
+                  .toList,
               )
             }
           val key =

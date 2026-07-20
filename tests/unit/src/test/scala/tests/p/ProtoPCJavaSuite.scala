@@ -2,8 +2,6 @@ package tests.p
 
 import java.nio.file.Files
 
-import scala.concurrent.Future
-
 import scala.meta.internal.jdk.CollectionConverters._
 import scala.meta.internal.metals.DecompilationConsent
 
@@ -17,22 +15,6 @@ import tests.BuildInfoVersions
  * navigate to the original proto file definitions.
  */
 class ProtoPCJavaSuite extends BaseProtoPCSuite("proto-pc-java") {
-
-  // Goto-definition on a proto-generated Java symbol now also returns the
-  // synthesized Java outline; these tests assert the proto declaration only,
-  // so they filter to the `.proto` location. Navigation to the generated
-  // outline is covered by the `java-navigates-to-generated-outline` tests.
-  private def assertProtoDefinition(
-      filename: String,
-      query: String,
-      expected: String,
-  )(implicit loc: munit.Location): Future[List[Location]] =
-    server.assertDefinition(
-      filename,
-      query,
-      expected,
-      includeLocation = _.getUri().endsWith(".proto"),
-    )
 
   // Test multiple messages from the same proto file in the same package
   test("java-imports-multiple-proto-messages") {
