@@ -35,7 +35,7 @@ private[decompile] final class ClassFileMemberLineVisitor(
         }
       }
     } else {
-      AsmVisitor.skipVisit
+      Asm.skipVisit
     }
   }
 }

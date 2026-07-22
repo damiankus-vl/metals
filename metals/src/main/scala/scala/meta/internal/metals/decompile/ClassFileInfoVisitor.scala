@@ -38,7 +38,7 @@ private final class ClassFileInfoVisitor extends ClassVisitor(Opcodes.ASM9) {
       exceptions: Array[String],
   ): MethodVisitor = {
     methods += MethodInfo(name, descriptor)
-    AsmVisitor.skipVisit
+    Asm.skipVisit
   }
 
   override def visitField(
@@ -49,7 +49,7 @@ private final class ClassFileInfoVisitor extends ClassVisitor(Opcodes.ASM9) {
       value: Any,
   ): FieldVisitor = {
     fields += name
-    AsmVisitor.skipVisit
+    Asm.skipVisit
   }
 
   def result: ClassFileInfo =

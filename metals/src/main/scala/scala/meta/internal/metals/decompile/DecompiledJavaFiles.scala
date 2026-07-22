@@ -3,6 +3,10 @@ package scala.meta.internal.metals.decompile
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.Paths
+
+import scala.concurrent.Await
+import scala.concurrent.duration._
 
 import scala.meta.internal.io.FileIO
 import scala.meta.internal.metals.Directories
@@ -64,7 +68,7 @@ object DecompiledJavaFiles {
    * a materialized decompiled file, or came from a class directory rather
    * than a jar.
    */
-  def jarFileNameOf(
+  def originJarFileName(
       workspace: AbsolutePath,
       path: AbsolutePath,
   ): Option[String] =
@@ -76,6 +80,55 @@ object DecompiledJavaFiles {
         .toSeq
         .headOption
         .filterNot(_ == classDirectoryMarker)
+    }
+
+  /**
+   * Recreates the materialized file for `javaFile` when it has been deleted
+   * (for example after a `.metals` clean, a `git clean`, or an editor
+   * reload), so navigation, hover, and completion inside it keep working.
+   * Mirrors
+   * [[scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles.regenerateIfMissing]],
+   * except regenerating here means re-running CFR against `jar` rather than
+   * re-parsing a `.proto`. Only applies to jar-sourced materialized files --
+   * a class-directory-sourced one has no `jar` to re-decompile from (see
+   * [[originJarFileName]], which callers already use to obtain `jar` before
+   * reaching here). No-op when the file still exists or its relative path
+   * can't be recovered.
+   */
+  def regenerateIfMissing(
+      workspace: AbsolutePath,
+      javaFile: AbsolutePath,
+      jar: AbsolutePath,
+      classpath: List[AbsolutePath],
+      decompiler: DecompileBytecode,
+  ): Unit =
+    if (!javaFile.exists) {
+      for {
+        rel <- javaFile.toRelativeInside(root(workspace))
+        segments = rel.toNIO.iterator().asScala.map(_.toString).toSeq
+        if segments.size > 1
+      } {
+        // No `.class` suffix: matches what `materialize`/`origin` and
+        // `CfrDecompiler.decompilePath` (which strips `.class` itself)
+        // already expect elsewhere -- `pathClass` denotes the class, not a
+        // literal file, the same way `Compilers.decompileAndLocate` builds it.
+        val classSegments = segments.tail
+        val classRelativePath =
+          (classSegments.init :+ classSegments.last.stripSuffix(".java"))
+            .mkString("/")
+        val pathClass =
+          FileIO.jarRootPath(jar).resolveZipPath(Paths.get(classRelativePath))
+        Await.result(
+          decompiler.decompilePath(pathClass, classpath),
+          30.seconds,
+        ) match {
+          case Right(code) => materialize(workspace, pathClass, Nil, code)
+          case Left(error) =>
+            scribe.error(
+              s"decompiled-java-files: failed to regenerate $pathClass: $error"
+            )
+        }
+      }
     }
 
   /**

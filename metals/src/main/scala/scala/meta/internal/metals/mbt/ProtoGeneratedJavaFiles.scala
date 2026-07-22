@@ -64,7 +64,7 @@ object ProtoGeneratedJavaFiles {
    * the path relative to the `proto-generated` root, up to and including the
    * first segment with a `.proto` extension.
    */
-  def protoPathFor(
+  def originProtoPath(
       workspace: AbsolutePath,
       path: AbsolutePath,
   ): Option[AbsolutePath] = {

@@ -454,9 +454,9 @@ class CompilerConfiguration(
         case _ => Nil
       }
       // MBT-imported targets (e.g. Bazel) never run a real compile
-      // themselves, so annotation-processor-generated classes (AutoValue,
-      // Lombok, ...) -- which have no `.java` source at all -- only exist in
-      // the target's own real compiled output. `createFileManagerFor`
+      // themselves, so annotation-processor-generated classes -- which have
+      // no `.java` source at all -- only exist in the target's own real
+      // compiled output. `createFileManagerFor`
       // synthesizes a Java outline for such classes (decompiled via CFR) and
       // feeds it through the virtual `-sourcepath`, so the presentation
       // compiler can resolve them without ever reading that real bytecode

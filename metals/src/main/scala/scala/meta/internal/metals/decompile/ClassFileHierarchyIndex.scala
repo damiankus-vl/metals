@@ -199,8 +199,9 @@ final class ClassFileHierarchyIndex(
   /**
    * The 1-based source line of `memberName` on `classSymbol`, read from the
    * bytecode `LineNumberTable`. Used to jump to real source for a method that
-   * exists only in compiled output (e.g. a Lombok accessor), where the line
-   * points back at the annotated field. `methodDescriptor`, when given, picks
+   * exists only in compiled output (e.g. an annotation-processor-generated
+   * accessor), where the line points back at the annotated field.
+   * `methodDescriptor`, when given, picks
    * out one overload, so overloads sharing a name resolve to their own line
    * instead of all collapsing onto the first. `None` if the class isn't found
    * or has no debug line info.

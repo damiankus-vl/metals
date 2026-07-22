@@ -292,9 +292,9 @@ object BazelMbtBuildSupport {
 
   /**
    * Collects every class directory for a namespace, not just the first: a
-   * namespace can aggregate several targets, and a member (e.g. a
-   * Lombok-generated accessor) may exist only in the compiled output of a
-   * non-first one.
+   * namespace can aggregate several targets, and a member (e.g. an
+   * annotation-processor-generated accessor) may exist only in the compiled
+   * output of a non-first one.
    */
   private def computeClassDirectories(
       targetLabels: List[String],

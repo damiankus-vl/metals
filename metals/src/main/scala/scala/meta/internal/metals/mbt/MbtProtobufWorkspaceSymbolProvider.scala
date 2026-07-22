@@ -30,7 +30,7 @@ final class MbtProtobufWorkspaceSymbolProvider(
   def isJavaPackageIndexingEnabled: Boolean =
     protobufLspConfig().definition
 
-  def listProtoJavaOutlinesForPackage(
+  def outlinesForPackage(
       pkg: String,
       documentsByPackage: TrieMap[String, ConcurrentSkipListSet[Path]],
       documents: TrieMap[AbsolutePath, IndexedDocument],

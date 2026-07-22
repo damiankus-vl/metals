@@ -110,6 +110,8 @@ class MbtWorkspaceSymbolProvider(
       ProtobufLspConfig.default,
     metalsOutDir: Option[Path] = None,
     mbtBuild: () => MbtBuild = () => MbtBuild.empty,
+    decompilationConsent: () => Future[Boolean] = () => Future.successful(true),
+    bytecodeAugmentedClassNavigationEnabled: () => Boolean = () => true,
 )(implicit
     val ec: ExecutionContext = ExecutionContext.Implicits.global,
     val rc: ReportContext = LoggerReportContext,
@@ -131,14 +133,30 @@ class MbtWorkspaceSymbolProvider(
     clearAllProtobufCaches,
   )
   private lazy val compiledOnlyOutlineProvider =
-    new MbtCompiledOnlyOutlineProvider(mbtBuild, workspace)
+    new MbtCompiledOnlyOutlineProvider(
+      mbtBuild,
+      workspace,
+      decompilationConsent,
+      bytecodeAugmentedClassNavigationEnabled,
+    )
+
+  /**
+   * Recreates the materialized compiled-only outline for `javaFile` if it's
+   * missing (e.g. after a `.metals` clean), so navigation into it keeps
+   * working. See [[MbtCompiledOnlyOutlineProvider.regenerateIfMissing]].
+   */
+  def regenerateCompiledOnlyOutlineIfMissing(
+      buildTargetId: String,
+      javaFile: AbsolutePath,
+  ): Unit =
+    compiledOnlyOutlineProvider.regenerateIfMissing(buildTargetId, javaFile)
 
   /**
    * Like [[createFileManager]], but for a specific build target: the
    * resulting file manager's `-sourcepath` listing also includes synthesized
    * outlines for classes that exist only in `buildTargetId`'s own real
-   * compiled output (e.g. AutoValue/Lombok-generated classes with no `.java`
-   * source at all). See [[MbtCompiledOnlyOutlineProvider]].
+   * compiled output (e.g. annotation-processor-generated classes with no
+   * `.java` source at all). See [[MbtCompiledOnlyOutlineProvider]].
    */
   def createFileManagerFor(
       buildTargetId: String,
@@ -209,8 +227,8 @@ class MbtWorkspaceSymbolProvider(
       // We don't need to re-compile the workspace super regularly because we can
       // load recently changed files from the sourcepath.
       () => turbineRecompileDelay(),
-      listProtoJavaOutlinesForPackage = pkg =>
-        protobufWorkspace.listProtoJavaOutlinesForPackage(
+      protoOutlinesForPackage = pkg =>
+        protobufWorkspace.outlinesForPackage(
           pkg,
           documentsByPackage,
           documents,

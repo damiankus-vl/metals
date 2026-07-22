@@ -124,6 +124,8 @@ case class UserConfiguration(
     startMcpServer: Boolean = false,
     mcpClient: Option[String] = None,
     importGeneratedSourcesMbt: Boolean = false,
+    decompiledClassNavigationEnabled: Boolean = true,
+    bytecodeAugmentedClassNavigationEnabled: Boolean = true,
 ) {
 
   def isMbtDefinitionProviderEnabled: Boolean =
@@ -370,6 +372,18 @@ case class UserConfiguration(
           (
             "importGeneratedSourcesMbt",
             importGeneratedSourcesMbt,
+          )
+        ),
+        Some(
+          (
+            "decompiledClassNavigation",
+            decompiledClassNavigationEnabled,
+          )
+        ),
+        Some(
+          (
+            "bytecodeAugmentedClassNavigation",
+            bytecodeAugmentedClassNavigationEnabled,
           )
         ),
         Some(
@@ -1473,6 +1487,12 @@ object UserConfiguration {
     val importGeneratedSourcesMbt =
       getBooleanKey("import-generated-sources-mbt").getOrElse(false)
 
+    val decompiledClassNavigationEnabled =
+      getBooleanKey("decompiled-class-navigation").getOrElse(true)
+
+    val bytecodeAugmentedClassNavigationEnabled =
+      getBooleanKey("bytecode-augmented-class-navigation").getOrElse(true)
+
     if (errors.isEmpty) {
       Right(
         UserConfiguration(
@@ -1538,6 +1558,8 @@ object UserConfiguration {
           startMcpServer,
           mcpClient,
           importGeneratedSourcesMbt,
+          decompiledClassNavigationEnabled,
+          bytecodeAugmentedClassNavigationEnabled,
         )
       )
     } else {

@@ -369,6 +369,9 @@ abstract class MetalsLspService(
     protobufLspConfig = () => userConfig.protobufLspConfig,
     metalsOutDir = Some(embedded.targetDir),
     mbtBuild = () => mbtBuild,
+    decompilationConsent = () => decompilationConsent.ensureConsent(),
+    bytecodeAugmentedClassNavigationEnabled = () =>
+      userConfig.bytecodeAugmentedClassNavigationEnabled,
   )
 
   override val mbtSymbolSearch: MbtWorkspaceSymbolProvider = mbt2

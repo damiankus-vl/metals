@@ -177,8 +177,8 @@ abstract class BazelMbtImporter(
   /**
    * Rules whose class jar should be recorded: runnable targets plus plain
    * libraries. Libraries used to be excluded, hiding members that only exist
-   * in compiled output (e.g. Lombok-generated accessors) since the header
-   * compiler never produces them.
+   * in compiled output (e.g. annotation-processor-generated accessors) since
+   * the header compiler never produces them.
    */
   private def producesClassJar(ruleClass: String): Boolean =
     isRunnableRule(ruleClass) ||

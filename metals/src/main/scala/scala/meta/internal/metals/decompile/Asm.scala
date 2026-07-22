@@ -1,6 +1,6 @@
 package scala.meta.internal.metals.decompile
 
-object AsmVisitor {
+object Asm {
 
   /**
    * `null` tells ASM to skip visiting a member's body, per the Javadoc of

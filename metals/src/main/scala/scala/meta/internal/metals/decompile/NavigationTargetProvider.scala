@@ -57,8 +57,8 @@ private object SymbolKind {
  * @param classSourceFile
  *   the workspace source file declaring a class, if any. When a member's
  *   declaring class has source, the target points there at the member's
- *   bytecode line (e.g. landing a Lombok accessor on its annotated field)
- *   instead of at the `.class`.
+ *   bytecode line (e.g. landing an annotation-processor-generated accessor
+ *   on its annotated field) instead of at the `.class`.
  */
 final class NavigationTargetProvider(
     classpathEntries: () => Iterator[AbsolutePath],
@@ -78,7 +78,7 @@ final class NavigationTargetProvider(
    *    member of the same name (ancestors may live in different jars), so an
    *    inherited or overridden member offers each declaration.
    */
-  def classHierarchyTargets(
+  def targetsFor(
       rawSymbol: String
   ): Future[Seq[(String, l.Location)]] = Future {
     val symbol = recoverNestedClassSymbol(rawSymbol)
@@ -174,8 +174,9 @@ final class NavigationTargetProvider(
    * A range over the member's identifier on `oneBasedLine`, so navigation
    * lands on the name rather than the whole line (matching a full Java
    * language server lets the editor merge the two results). A compiled-only
-   * accessor (e.g. a Lombok `@Getter`) has no body, so its bytecode line
-   * points at the annotated field instead -- its derived field name is tried
+   * accessor (e.g. an annotation-processor-generated getter) has no body, so
+   * its bytecode line points at the annotated field instead -- its derived
+   * field name is tried
    * too. Falls back to the line start if no identifier matches.
    */
   private def memberRange(

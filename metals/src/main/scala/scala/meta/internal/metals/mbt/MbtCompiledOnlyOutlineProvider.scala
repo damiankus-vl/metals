@@ -13,12 +13,14 @@ import javax.tools.SimpleJavaFileObject
 
 import scala.collection.concurrent.TrieMap
 import scala.concurrent.Await
+import scala.concurrent.Future
+import scala.concurrent.duration.Duration
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
 
 import scala.meta.internal.io.FileIO
 import scala.meta.internal.metals.MetalsEnrichments._
-import scala.meta.internal.metals.decompile.CfrDecompiler
+import scala.meta.internal.metals.decompile.DecompileBytecode
 import scala.meta.io.AbsolutePath
 import scala.meta.pc
 import scala.meta.pc.SemanticdbCompilationUnit
@@ -28,7 +30,7 @@ import ch.epfl.scala.bsp4j.BuildTargetIdentifier
 /**
  * A Java source outline for a class that exists only in a build target's
  * real compiled output (no `.java` source anywhere) -- e.g. an
- * annotation-processor-generated companion class (AutoValue, Lombok, ...).
+ * annotation-processor-generated companion class.
  * Decompiled from bytecode via CFR lazily on first read, then cached, so the
  * cost is only paid for classes javac actually ends up parsing rather than
  * every class enumerated in the package.
@@ -44,7 +46,8 @@ final class CompiledOnlyOutlineFile(
     binaryClassName: String,
     packageName: String,
     classpath: List[AbsolutePath],
-    decompiler: CfrDecompiler,
+    decompiler: DecompileBytecode,
+    decompilationConsent: () => Future[Boolean],
 ) extends SimpleJavaFileObject(
       MbtCompiledOnlyOutlineFiles
         .pathFor(workspace, buildTargetId, binaryClassName)
@@ -69,18 +72,28 @@ final class CompiledOnlyOutlineFile(
   override def getCharContent(ignoreEncodingErrors: Boolean): CharSequence =
     decompiledText
 
+  // Blocks (with no fixed timeout of its own) on `decompilationConsent()`,
+  // which is itself internally time-bounded and always eventually settles
+  // (see `DecompilationConsent.ensureConsent`) -- a bare `Duration.Inf` here
+  // just means "wait however long that already-bounded prompt takes" rather
+  // than racing it with a second, potentially shorter timeout.
   private lazy val decompiledText: String = {
-    val source = Await.result(
-      decompiler.decompile(binaryClassName, classpath),
-      30.seconds,
-    ) match {
-      case Right(source) => source
-      case Left(error) =>
-        scribe.error(
-          s"mbt-compiled-only-outline: failed to decompile $binaryClassName: $error"
-        )
+    val consented = Await.result(decompilationConsent(), Duration.Inf)
+    val source =
+      if (!consented)
         s"package ${packageName.replace('/', '.')};\n"
-    }
+      else
+        Await.result(
+          decompiler.decompile(binaryClassName, classpath),
+          30.seconds,
+        ) match {
+          case Right(source) => source
+          case Left(error) =>
+            scribe.error(
+              s"mbt-compiled-only-outline: failed to decompile $binaryClassName: $error"
+            )
+            s"package ${packageName.replace('/', '.')};\n"
+        }
     // Materialized to a real file so goto-definition into this outline opens
     // it like any other dependency source, instead of an in-memory-only URI
     // the editor can neither read nor (its filesystem being read-only from
@@ -103,8 +116,10 @@ final class CompiledOnlyOutlineFile(
 final class MbtCompiledOnlyOutlineProvider(
     mbtBuild: () => MbtBuild,
     workspace: AbsolutePath,
+    decompilationConsent: () => Future[Boolean] = () => Future.successful(true),
+    enabled: () => Boolean = () => true,
 ) {
-  private val decompiler = new CfrDecompiler
+  private val decompiler = DecompileBytecode.cfr
   private val cache =
     new ConcurrentHashMap[(String, String), JavaFileObject]()
 
@@ -145,16 +160,71 @@ final class MbtCompiledOnlyOutlineProvider(
       packageName: String,
       dependencyClasspath: Seq[AbsolutePath],
   ): Iterator[JavaFileObject] = {
-    val classDirs = classDirectoriesFor(buildTargetId)
-    if (classDirs.isEmpty) Iterator.empty
+    if (!enabled()) Iterator.empty
     else {
-      val fullClasspath = (classDirs ++ dependencyClasspath).toList
-      for {
-        classDir <- classDirs.iterator
-        simpleName <- classNamesInPackage(classDir, packageName).iterator
-      } yield outlineFor(buildTargetId, packageName, simpleName, fullClasspath)
+      val classDirs = classDirectoriesFor(buildTargetId)
+      if (classDirs.isEmpty) Iterator.empty
+      else {
+        val fullClasspath = (classDirs ++ dependencyClasspath).toList
+        for {
+          classDir <- classDirs.iterator
+          simpleName <- classNamesInPackage(classDir, packageName).iterator
+        } yield outlineFor(
+          buildTargetId,
+          packageName,
+          simpleName,
+          fullClasspath,
+        )
+      }
     }
   }
+
+  /**
+   * Recreates the materialized outline for `javaFile` when it has been
+   * deleted (for example after a `.metals` clean, a `git clean`, or an
+   * editor reload), so navigation, hover, and completion inside it keep
+   * working. Mirrors `ProtoGeneratedJavaFiles.regenerateIfMissing`. No-op
+   * when the file still exists, the feature is disabled, or its binary class
+   * name/classpath can't be recovered.
+   *
+   * If this outline's `CompiledOnlyOutlineFile` is still cached in memory
+   * from an earlier read, `outlineFor` returns that same instance and
+   * `.text()` just returns its already-decompiled content (no redundant CFR
+   * run) -- the explicit `materialize` call below still re-writes the file,
+   * which is exactly what's needed when only the on-disk copy was deleted.
+   */
+  def regenerateIfMissing(buildTargetId: String, javaFile: AbsolutePath): Unit =
+    if (enabled() && !javaFile.exists) {
+      MbtCompiledOnlyOutlineFiles
+        .originBinaryClassName(workspace, javaFile)
+        .foreach { binaryClassName =>
+          val classDirs = classDirectoriesFor(buildTargetId)
+          if (classDirs.nonEmpty) {
+            val lastDot = binaryClassName.lastIndexOf('.')
+            val simpleName =
+              if (lastDot < 0) binaryClassName
+              else binaryClassName.substring(lastDot + 1)
+            val packageName =
+              if (lastDot < 0) ""
+              else binaryClassName.substring(0, lastDot).replace('.', '/')
+            outlineFor(
+              buildTargetId,
+              packageName,
+              simpleName,
+              classDirs.toList,
+            ) match {
+              case outline: CompiledOnlyOutlineFile =>
+                MbtCompiledOnlyOutlineFiles.materialize(
+                  workspace,
+                  buildTargetId,
+                  binaryClassName,
+                  outline.text(),
+                )
+              case _ => ()
+            }
+          }
+        }
+    }
 
   private def outlineFor(
       buildTargetId: String,
@@ -175,6 +245,7 @@ final class MbtCompiledOnlyOutlineProvider(
           packageName,
           classpath,
           decompiler,
+          decompilationConsent,
         ),
     )
   }
@@ -207,9 +278,10 @@ final class MbtCompiledOnlyOutlineProvider(
           val name = it.next().getFileName.toString
           // A `$` past the first character marks a nested/anonymous class
           // (`Outer$Inner.class`) to skip. A LEADING `$` is not a nested-class
-          // separator -- it's a top-level class, e.g. AutoValue's `$AutoValue_Foo`
-          // abstract base for `@Memoized`-annotated value classes -- and must be
-          // kept, or a sibling outline `extends`-ing it can't fully resolve.
+          // separator -- it's a top-level class, e.g. a `$`-prefixed abstract
+          // base class an annotation processor emits alongside its generated
+          // value class -- and must be kept, or a sibling outline
+          // `extends`-ing it can't fully resolve.
           if (name.endsWith(".class") && name.indexOf('$', 1) < 0)
             builder += name.stripSuffix(".class")
         }

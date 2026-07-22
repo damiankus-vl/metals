@@ -24,8 +24,8 @@ import tests.BuildInfo
 
 /**
  * MBT (e.g. Bazel) targets don't run a real compile themselves, so
- * annotation-processor-generated classes (AutoValue, Lombok, ...) only exist
- * in the class output of a prior real build, declared via a namespace's
+ * annotation-processor-generated classes only exist in the class output of
+ * a prior real build, declared via a namespace's
  * `classDirectories`. Checks that the Java presentation compiler resolves a
  * reference to such a compiled-only, source-less class instead of reporting
  * "cannot find symbol".
@@ -96,9 +96,10 @@ class MbtJavaClassDirectoriesLspSuite
 
   /**
    * Same as [[writeCompiledOnlyClassJar]], but for a jar with several
-   * top-level classes -- e.g. AutoValue emits both `AutoValue_Foo` and a
-   * `$`-prefixed abstract base `$AutoValue_Foo` for a `@Memoized`-annotated
-   * value class, both top-level, with the former extending the latter.
+   * top-level classes -- e.g. an annotation processor emitting both
+   * `Generated_Foo` and a `$`-prefixed abstract base `$Generated_Foo` for an
+   * annotated value class, both top-level, with the former extending the
+   * latter.
    */
   private def writeCompiledOnlyClassesJar(
       workspace: AbsolutePath,
@@ -132,8 +133,8 @@ class MbtJavaClassDirectoriesLspSuite
    * `InnerClasses` attribute on both class files, mirroring what real javac
    * emits for e.g. `ClassInfo` and its nested `MemberInfo`), plus a third
    * top-level class `subclassInternalName` extending the nested class
-   * directly -- mirroring AutoValue's
-   * `$AutoValue_ClassInfo_MemberInfo extends ClassInfo.MemberInfo`.
+   * directly -- mirroring an annotation processor's
+   * `$Generated_ClassInfo_MemberInfo extends ClassInfo.MemberInfo`.
    */
   private def writeNestedClassJar(
       workspace: AbsolutePath,
@@ -214,7 +215,7 @@ class MbtJavaClassDirectoriesLspSuite
     )
   }
 
-  test("autovalue-style-companion-class-resolves-from-class-directory") {
+  test("generated-companion-class-resolves-from-class-directory") {
     for {
       _ <- initialize(
         """|/.metals/mbt.json
@@ -231,7 +232,7 @@ class MbtJavaClassDirectoriesLspSuite
            |
            |public abstract class Foo {
            |  public static Foo create() {
-           |    AutoValue_Foo instance = new AutoValue_Foo();
+           |    Generated_Foo instance = new Generated_Foo();
            |    return instance;
            |  }
            |}
@@ -240,7 +241,7 @@ class MbtJavaClassDirectoriesLspSuite
           writeCompiledOnlyClassJar(
             workspace,
             "a/prebuilt-classes.jar",
-            "example/AutoValue_Foo",
+            "example/Generated_Foo",
             "example/Foo",
           ),
       )
@@ -248,7 +249,7 @@ class MbtJavaClassDirectoriesLspSuite
       _ <- server.didFocus("a/src/example/Foo.java")
       definitionLocations <- server.definitionSubstringQuery(
         "a/src/example/Foo.java",
-        "AutoValue_@@Foo",
+        "Generated_@@Foo",
       )
     } yield {
       assertNoDiagnostics()
@@ -257,7 +258,7 @@ class MbtJavaClassDirectoriesLspSuite
   }
 
   test(
-    "autovalue-style-companion-class-resolves-despite-newer-jdk-bytecode"
+    "generated-companion-class-resolves-despite-newer-jdk-bytecode"
   ) {
     // Class-file major version 65 = JDK 21, newer than any JDK the Metals
     // server itself is expected to run on. Real javac's `-classpath` reader
@@ -281,7 +282,7 @@ class MbtJavaClassDirectoriesLspSuite
            |
            |public abstract class Foo {
            |  public static Foo create() {
-           |    AutoValue_Foo instance = new AutoValue_Foo();
+           |    Generated_Foo instance = new Generated_Foo();
            |    return instance;
            |  }
            |}
@@ -290,7 +291,7 @@ class MbtJavaClassDirectoriesLspSuite
           writeCompiledOnlyClassJar(
             workspace,
             "a/prebuilt-classes.jar",
-            "example/AutoValue_Foo",
+            "example/Generated_Foo",
             "example/Foo",
             classFileVersion = newerJdkClassFileVersion,
           ),
@@ -299,7 +300,7 @@ class MbtJavaClassDirectoriesLspSuite
       _ <- server.didFocus("a/src/example/Foo.java")
       definitionLocations <- server.definitionSubstringQuery(
         "a/src/example/Foo.java",
-        "AutoValue_@@Foo",
+        "Generated_@@Foo",
       )
     } yield {
       assertNoDiagnostics()
@@ -308,12 +309,13 @@ class MbtJavaClassDirectoriesLspSuite
   }
 
   test(
-    "autovalue-memoized-style-dollar-prefixed-base-resolves-without-fallback"
+    "dollar-prefixed-generated-base-resolves-without-fallback"
   ) {
-    // AutoValue emits an extra top-level, `$`-prefixed abstract base class
-    // (not a nested class) for a `@Memoized`-annotated value class, e.g.
-    // `$AutoValue_ClassInfo_MemberInfo`, which `AutoValue_ClassInfo_MemberInfo`
-    // itself extends. If the outline provider's package listing wrongly
+    // An annotation processor emits an extra top-level, `$`-prefixed
+    // abstract base class (not a nested class) for an annotated value
+    // class, e.g. `$Generated_ClassInfo_MemberInfo`, which
+    // `Generated_ClassInfo_MemberInfo` itself extends. If the outline
+    // provider's package listing wrongly
     // treats a leading `$` as a nested-class marker and skips it, the
     // `$`-prefixed class never gets its own synthesized outline -- so a
     // direct reference to IT (unlike a reference to its concrete subclass,
@@ -338,8 +340,8 @@ class MbtJavaClassDirectoriesLspSuite
            |
            |public abstract class Foo {
            |  public static void create() {
-           |    $AutoValue_ClassInfo_MemberInfo base =
-           |        new AutoValue_ClassInfo_MemberInfo();
+           |    $Generated_ClassInfo_MemberInfo base =
+           |        new Generated_ClassInfo_MemberInfo();
            |  }
            |}
            |""".stripMargin,
@@ -348,9 +350,9 @@ class MbtJavaClassDirectoriesLspSuite
             workspace,
             "a/prebuilt-classes.jar",
             List(
-              "example/$AutoValue_ClassInfo_MemberInfo" -> "java/lang/Object",
-              "example/AutoValue_ClassInfo_MemberInfo" ->
-                "example/$AutoValue_ClassInfo_MemberInfo",
+              "example/$Generated_ClassInfo_MemberInfo" -> "java/lang/Object",
+              "example/Generated_ClassInfo_MemberInfo" ->
+                "example/$Generated_ClassInfo_MemberInfo",
             ),
           ),
       )
@@ -358,20 +360,21 @@ class MbtJavaClassDirectoriesLspSuite
       _ <- server.didFocus("a/src/example/Foo.java")
       definitionLocations <- server.definitionSubstringQuery(
         "a/src/example/Foo.java",
-        "$AutoValue_@@ClassInfo_MemberInfo",
+        "$Generated_@@ClassInfo_MemberInfo",
       )
     } yield {
       assertNoDiagnostics()
       assertOpenableDefinition(definitionLocations)
-      assertNotDecompiledAsFallback("$AutoValue_ClassInfo_MemberInfo")
+      assertNotDecompiledAsFallback("$Generated_ClassInfo_MemberInfo")
     }
   }
 
   test(
     "goto-definition-into-nested-class-from-inside-compiled-only-outline"
   ) {
-    // AutoValue's `$AutoValue_ClassInfo_MemberInfo` extends the real nested
-    // class `ClassInfo.MemberInfo`, and CFR decompiles that reference as the
+    // The generated `$Generated_ClassInfo_MemberInfo` extends the real
+    // nested class `ClassInfo.MemberInfo`, and CFR decompiles that reference
+    // as the
     // qualified `extends ClassInfo.MemberInfo` (confirmed against a real
     // Bazel workspace's decompiled output). Goto-definition on `MemberInfo`
     // from *inside* that decompiled/materialized outline file -- not from a
@@ -398,8 +401,8 @@ class MbtJavaClassDirectoriesLspSuite
            |
            |public abstract class Foo {
            |  public static void create() {
-           |    AutoValue_ClassInfo_MemberInfo instance =
-           |        new AutoValue_ClassInfo_MemberInfo();
+           |    Generated_ClassInfo_MemberInfo instance =
+           |        new Generated_ClassInfo_MemberInfo();
            |  }
            |}
            |""".stripMargin,
@@ -409,7 +412,7 @@ class MbtJavaClassDirectoriesLspSuite
             "a/prebuilt-classes.jar",
             outerInternalName = "example/ClassInfo",
             innerSimpleName = "MemberInfo",
-            subclassInternalName = "example/AutoValue_ClassInfo_MemberInfo",
+            subclassInternalName = "example/Generated_ClassInfo_MemberInfo",
           ),
       )
       // Compiling Foo.java for diagnostics (not a definition query) already
@@ -426,7 +429,7 @@ class MbtJavaClassDirectoriesLspSuite
       _ <- server.didFocus("a/src/example/Foo.java")
       outlineUri = {
         assertNoDiagnostics()
-        materializedCompiledOnlyOutlineUri("AutoValue_ClassInfo_MemberInfo")
+        materializedCompiledOnlyOutlineUri("Generated_ClassInfo_MemberInfo")
       }
       _ <- server.didOpen(outlineUri)
       _ <- server.didFocus(outlineUri)

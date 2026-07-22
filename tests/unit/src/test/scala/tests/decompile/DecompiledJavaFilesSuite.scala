@@ -2,14 +2,48 @@ package tests.decompile
 
 import java.nio.file.Files
 
+import scala.concurrent.ExecutionContext
+import scala.concurrent.Future
+
 import scala.meta.internal.io.FileIO
 import scala.meta.internal.io.PlatformFileIO
+import scala.meta.internal.metals.MetalsEnrichments._
+import scala.meta.internal.metals.decompile.DecompileBytecode
 import scala.meta.internal.metals.decompile.DecompiledJavaFiles
 import scala.meta.io.AbsolutePath
 
 class DecompiledJavaFilesSuite extends munit.FunSuite {
+  implicit val ec: ExecutionContext = ExecutionContext.global
 
   private val sep = java.io.File.separator
+
+  private def stubDecompiler(
+      result: Either[String, String]
+  ): DecompileBytecode =
+    new DecompileBytecode {
+      def decompilePath(
+          path: AbsolutePath,
+          extraClassPath: List[AbsolutePath],
+      ): Future[Either[String, String]] = Future.successful(result)
+      def decompile(
+          className: String,
+          extraClassPath: List[AbsolutePath],
+      ): Future[Either[String, String]] = Future.successful(result)
+    }
+
+  private def failingDecompiler: DecompileBytecode =
+    new DecompileBytecode {
+      def decompilePath(
+          path: AbsolutePath,
+          extraClassPath: List[AbsolutePath],
+      ): Future[Either[String, String]] =
+        fail("decompiler should not run when the file already exists")
+      def decompile(
+          className: String,
+          extraClassPath: List[AbsolutePath],
+      ): Future[Either[String, String]] =
+        fail("decompiler should not run when the file already exists")
+    }
 
   private def emptyJar(name: String = "test.jar"): AbsolutePath = {
     val zip = AbsolutePath(
@@ -23,7 +57,7 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     AbsolutePath(Files.createTempDirectory("workspace"))
 
   test("materializes a jar entry's decompiled code keyed by jar and path") {
-    val jar = emptyJar("args4j-2.37.jar")
+    val jar = emptyJar("example-lib-1.0.jar")
     val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
     val pathClass = AbsolutePath(fs.getPath("/com/example/Outer"))
     val ws = workspace()
@@ -35,7 +69,7 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
     val javaFile = result.get
     assert(
       javaFile.toString.endsWith(
-        s"${sep}.metals${sep}readonly${sep}dependencies${sep}decompiled${sep}args4j-2.37.jar${sep}com${sep}example${sep}Outer.java"
+        s"${sep}.metals${sep}readonly${sep}dependencies${sep}decompiled${sep}example-lib-1.0.jar${sep}com${sep}example${sep}Outer.java"
       ),
       s"unexpected materialized path: $javaFile",
     )
@@ -121,7 +155,7 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
   }
 
   test("recovers the originating jar's filename from a materialized path") {
-    val jar = emptyJar("args4j-2.37.jar")
+    val jar = emptyJar("example-lib-1.0.jar")
     val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
     val pathClass = AbsolutePath(fs.getPath("/com/example/Outer"))
     val ws = workspace()
@@ -130,13 +164,13 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
       DecompiledJavaFiles.materialize(ws, pathClass, Nil, "code").get
 
     assertEquals(
-      DecompiledJavaFiles.jarFileNameOf(ws, javaFile),
-      Some("args4j-2.37.jar"),
+      DecompiledJavaFiles.originJarFileName(ws, javaFile),
+      Some("example-lib-1.0.jar"),
     )
   }
 
   test(
-    "jarFileNameOf is None for a class-directory-sourced materialized file"
+    "originJarFileName is None for a class-directory-sourced materialized file"
   ) {
     val classDir = AbsolutePath(Files.createTempDirectory("classdir"))
     val pathClass = classDir.resolve("com").resolve("example").resolve("Outer")
@@ -146,13 +180,13 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
       .materialize(ws, pathClass, List(classDir), "code")
       .get
 
-    assertEquals(DecompiledJavaFiles.jarFileNameOf(ws, javaFile), None)
+    assertEquals(DecompiledJavaFiles.originJarFileName(ws, javaFile), None)
   }
 
-  test("jarFileNameOf is None for a path outside the decompiled tree") {
+  test("originJarFileName is None for a path outside the decompiled tree") {
     val ws = workspace()
     assertEquals(
-      DecompiledJavaFiles.jarFileNameOf(ws, ws.resolve("Foo.java")),
+      DecompiledJavaFiles.originJarFileName(ws, ws.resolve("Foo.java")),
       None,
     )
   }
@@ -216,6 +250,77 @@ class DecompiledJavaFilesSuite extends munit.FunSuite {
       DecompiledJavaFiles.topLevelClassPath(nestedModule),
       AbsolutePath(fs.getPath("/com/example/Outer")),
     )
+  }
+
+  test("regenerateIfMissing recreates a deleted materialized file") {
+    val jar = emptyJar("example-lib-1.0.jar")
+    val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
+    val pathClass = AbsolutePath(fs.getPath("/com/example/Outer"))
+    val ws = workspace()
+    val content = "package com.example;\npublic class Outer {}\n"
+
+    val javaFile =
+      DecompiledJavaFiles.materialize(ws, pathClass, Nil, content).get
+    Files.delete(javaFile.toNIO)
+    assert(!javaFile.exists)
+
+    DecompiledJavaFiles.regenerateIfMissing(
+      ws,
+      javaFile,
+      jar,
+      Nil,
+      stubDecompiler(Right(content)),
+    )
+
+    assert(javaFile.exists, "expected the file to be recreated")
+    assertEquals(
+      FileIO.slurp(javaFile, java.nio.charset.StandardCharsets.UTF_8),
+      content,
+    )
+  }
+
+  test("regenerateIfMissing is a no-op when the file still exists") {
+    val jar = emptyJar("example-lib-1.0.jar")
+    val fs = PlatformFileIO.newJarFileSystem(jar, create = false)
+    val pathClass = AbsolutePath(fs.getPath("/com/example/Outer"))
+    val ws = workspace()
+    val content = "package com.example;\npublic class Outer {}\n"
+
+    val javaFile =
+      DecompiledJavaFiles.materialize(ws, pathClass, Nil, content).get
+
+    // Would fail the test if the decompiler ran.
+    DecompiledJavaFiles.regenerateIfMissing(
+      ws,
+      javaFile,
+      jar,
+      Nil,
+      failingDecompiler,
+    )
+
+    assertEquals(
+      FileIO.slurp(javaFile, java.nio.charset.StandardCharsets.UTF_8),
+      content,
+    )
+  }
+
+  test(
+    "regenerateIfMissing does nothing for a path outside the decompiled tree"
+  ) {
+    val jar = emptyJar("example-lib-1.0.jar")
+    val ws = workspace()
+    val outsideFile = ws.resolve("Foo.java")
+
+    // Would fail the test if the decompiler ran.
+    DecompiledJavaFiles.regenerateIfMissing(
+      ws,
+      outsideFile,
+      jar,
+      Nil,
+      failingDecompiler,
+    )
+
+    assert(!outsideFile.exists)
   }
 
   test("topLevelClassPath also redirects a class-directory entry") {

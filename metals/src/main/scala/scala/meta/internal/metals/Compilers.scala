@@ -171,6 +171,8 @@ class Compilers(
    * cleared in [[cancel]], which already runs on every reimport in lockstep
    * with `TargetData.reset()`.
    */
+  private val protoGeneratedJavaTargetCache =
+    new TrieMap[AbsolutePath, Option[BuildTargetIdentifier]]()
   private val decompiledJavaTargetCache =
     new TrieMap[AbsolutePath, Option[BuildTargetIdentifier]]()
   private val compiledOnlyOutlineTargetCache =
@@ -350,6 +352,7 @@ class Compilers(
     presentationCompilerWorksheetsCache.invalidateAll()
     worksheetsDigests.clear()
     outlineFilesProvider.clear()
+    protoGeneratedJavaTargetCache.clear()
     decompiledJavaTargetCache.clear()
     compiledOnlyOutlineTargetCache.clear()
   }
@@ -1578,7 +1581,10 @@ class Compilers(
       symbol: String,
       locations: Seq[l.Location],
   ): Future[Seq[l.Location]] = {
-    if (locations.isEmpty || !locations.head.getUri().endsWith(".class"))
+    if (
+      !userConfig().decompiledClassNavigationEnabled ||
+      locations.isEmpty || !locations.head.getUri().endsWith(".class")
+    )
       Future.successful(Nil)
     else
       // Actual decompilation needs user consent (prompted at most once per
@@ -1662,7 +1668,8 @@ class Compilers(
   def classHierarchyTargets(
       symbol: String
   ): Future[Seq[(String, l.Location)]] =
-    classHierarchyTargetProvider.classHierarchyTargets(symbol)
+    if (!userConfig().decompiledClassNavigationEnabled) Future.successful(Nil)
+    else classHierarchyTargetProvider.targetsFor(symbol)
 
   private val classHierarchyTargetProvider =
     new NavigationTargetProvider(
@@ -1670,7 +1677,7 @@ class Compilers(
         buildTargets.allWorkspaceJars ++
           fallbackClasspaths.javaCompilerClasspath().map(AbsolutePath(_)) ++
           // Needed to reach members that exist only after compilation
-          // (e.g. Lombok-generated accessors).
+          // (e.g. annotation-processor-generated accessors).
           fallbackClasspaths.classDirectories().map(AbsolutePath(_)),
       mbtWorkspaceSymbolProvider.protoJavaOutlineFor(_),
       classSourceFileOf,
@@ -1799,14 +1806,29 @@ class Compilers(
    */
   private def protoGeneratedJavaTarget(
       path: AbsolutePath
+  ): Option[BuildTargetIdentifier] =
+    memoizedBuildTarget(protoGeneratedJavaTargetCache, path)(
+      computeProtoGeneratedJavaTarget
+    )
+
+  private def computeProtoGeneratedJavaTarget(
+      path: AbsolutePath
   ): Option[BuildTargetIdentifier] = {
     if (!path.isJavaFilename) None
     else {
-      ProtoGeneratedJavaFiles.protoPathFor(workspace, path).flatMap {
+      ProtoGeneratedJavaFiles.originProtoPath(workspace, path).flatMap {
         protoPath =>
           // The materialized outline may have been deleted since it was first
           // generated (`.metals` clean, `git clean`, editor reload); recreate
-          // it so code intelligence inside it keeps working.
+          // it so code intelligence inside it keeps working. Now that this
+          // lookup is memoized (unlike the other two reverse-routing lookups
+          // below, `inverseSources` is an indexed lookup rather than a linear
+          // scan, so this didn't need caching until now for cost reasons --
+          // it does now so the self-healing check below only re-runs once
+          // per path per session, same as the other two), this only fires on
+          // a cache miss rather than every navigation, which is fine: a
+          // reimport (the normal trigger for `.metals` state changing)
+          // clears this cache via `cancel()`.
           ProtoGeneratedJavaFiles.regenerateIfMissing(
             workspace,
             path,
@@ -1836,14 +1858,26 @@ class Compilers(
   private def computeDecompiledJavaTarget(
       path: AbsolutePath
   ): Option[BuildTargetIdentifier] =
-    DecompiledJavaFiles.jarFileNameOf(workspace, path).flatMap { jarFileName =>
-      buildTargets.allWorkspaceJars
-        .find(_.filename == jarFileName)
-        .flatMap { jar =>
-          buildTargets.allBuildTargetIds.find(id =>
-            buildTargets.targetJarClasspath(id).exists(_.contains(jar))
-          )
-        }
+    DecompiledJavaFiles.originJarFileName(workspace, path).flatMap {
+      jarFileName =>
+        buildTargets.allWorkspaceJars
+          .find(_.filename == jarFileName)
+          .flatMap { jar =>
+            // The materialized file may have been deleted since it was first
+            // decompiled (`.metals` clean, `git clean`, editor reload);
+            // recreate it so code intelligence inside it keeps working. Only
+            // runs once per path per session since this lookup is memoized.
+            DecompiledJavaFiles.regenerateIfMissing(
+              workspace,
+              path,
+              jar,
+              buildTargets.allWorkspaceJars.toList,
+              DecompileBytecode.cfr,
+            )
+            buildTargets.allBuildTargetIds.find(id =>
+              buildTargets.targetJarClasspath(id).exists(_.contains(jar))
+            )
+          }
     }
 
   /**
@@ -1865,10 +1899,22 @@ class Compilers(
   private def computeCompiledOnlyOutlineTarget(
       path: AbsolutePath
   ): Option[BuildTargetIdentifier] =
-    MbtCompiledOnlyOutlineFiles.buildTargetHashFor(workspace, path).flatMap {
+    MbtCompiledOnlyOutlineFiles.originBuildTargetHash(workspace, path).flatMap {
       hash =>
         buildTargets.allBuildTargetIds
           .find(id => MD5.compute(id.getUri()) == hash)
+          .map { id =>
+            // The materialized outline may have been deleted since it was
+            // first synthesized (`.metals` clean, `git clean`, editor
+            // reload); recreate it so code intelligence inside it keeps
+            // working. Only runs once per path per session since this
+            // lookup is memoized.
+            mbtWorkspaceSymbolProvider.regenerateCompiledOnlyOutlineIfMissing(
+              id.getUri(),
+              path,
+            )
+            id
+          }
     }
 
   def loadWorksheetCompiler(

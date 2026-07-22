@@ -130,7 +130,7 @@ class TurbineCompiler[T](
     classpath: () => Seq[Path],
     progressBars: ProgressBars,
     turbineRecompileDelay: () => TurbineRecompileDelayConfig,
-    listProtoJavaOutlinesForPackage: String => Iterator[JavaFileObject],
+    protoOutlinesForPackage: String => Iterator[JavaFileObject],
     sleeper: Sleeper,
     onIndexingDone: () => Unit,
     onNewProjectClasspath: ClassPath => Unit,
@@ -288,7 +288,7 @@ class TurbineCompiler[T](
   ): java.lang.Iterable[JavaFileObject] = {
     val turbineFiles = listSourcepath(packageName)
     val protoPackage = packageName.replace('.', '/') + "/"
-    val protoFiles = listProtoJavaOutlinesForPackage(protoPackage)
+    val protoFiles = protoOutlinesForPackage(protoPackage)
     if (protoFiles.isEmpty) {
       turbineFiles
     } else {
