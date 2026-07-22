@@ -48,6 +48,21 @@ case class MbtBuild(
   def allClassDirectories(workspace: AbsolutePath): Seq[AbsolutePath] =
     mbtTargets.flatMap(_.resolvedClassDirectories(workspace)).distinct
 
+  /**
+   * Scoped variant of [[allClassDirectories]] for callers that want just one
+   * target's own declared class output, e.g. the Java presentation compiler
+   * resolving annotation-processor-generated members (Lombok, AutoValue,
+   * ...) for the target being edited.
+   */
+  def classDirectoriesFor(
+      id: bsp4j.BuildTargetIdentifier,
+      workspace: AbsolutePath,
+  ): Seq[AbsolutePath] =
+    mbtTargets
+      .find(_.id.getUri == id.getUri)
+      .map(_.resolvedClassDirectories(workspace))
+      .getOrElse(Nil)
+
   def asBspModules: bsp4j.DependencyModulesResult =
     new bsp4j.DependencyModulesResult(
       mbtTargets

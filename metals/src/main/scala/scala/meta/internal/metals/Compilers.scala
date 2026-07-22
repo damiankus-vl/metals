@@ -35,6 +35,7 @@ import scala.meta.internal.metals.decompile.DecompiledDeclarationSearch
 import scala.meta.internal.metals.decompile.DecompiledJavaFiles
 import scala.meta.internal.metals.decompile.NavigationTargetProvider
 import scala.meta.internal.metals.mbt.MbtBuild
+import scala.meta.internal.metals.mbt.MbtCompiledOnlyOutlineFiles
 import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
 import scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles
 import scala.meta.internal.mtags.MD5
@@ -1720,6 +1721,7 @@ class Compilers(
         .inverseSources(path)
         .orElse(protoGeneratedJavaTarget(path))
         .orElse(decompiledJavaTarget(path))
+        .orElse(compiledOnlyOutlineTarget(path))
 
       target match {
         case None =>
@@ -1803,6 +1805,24 @@ class Compilers(
             buildTargets.targetJarClasspath(id).exists(_.contains(jar))
           )
         }
+    }
+
+  /**
+   * A materialized compiled-only outline (see [[MbtCompiledOnlyOutlineFiles]])
+   * belongs to no build target; route it back to the target whose id hashes
+   * to the same value, so navigation from inside it (e.g. into another
+   * compiled-only sibling class in the same package) uses a presentation
+   * compiler wired with that target's own [[MbtCompiledOnlyOutlineFiles]]
+   * `-sourcepath` outlines, instead of the bare fallback compiler, which
+   * synthesizes none of them.
+   */
+  private def compiledOnlyOutlineTarget(
+      path: AbsolutePath
+  ): Option[BuildTargetIdentifier] =
+    MbtCompiledOnlyOutlineFiles.buildTargetHashFor(workspace, path).flatMap {
+      hash =>
+        buildTargets.allBuildTargetIds
+          .find(id => MD5.compute(id.getUri()) == hash)
     }
 
   def loadWorksheetCompiler(

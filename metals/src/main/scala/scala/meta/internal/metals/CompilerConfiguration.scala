@@ -453,7 +453,25 @@ class CompilerConfiguration(
         case j: JavaTarget if shouldUseOpts => j.options
         case _ => Nil
       }
+      // MBT-imported targets (e.g. Bazel) never run a real compile
+      // themselves, so annotation-processor-generated classes (AutoValue,
+      // Lombok, ...) -- which have no `.java` source at all -- only exist in
+      // the target's own real compiled output. `createFileManagerFor`
+      // synthesizes a Java outline for such classes (decompiled via CFR) and
+      // feeds it through the virtual `-sourcepath`, so the presentation
+      // compiler can resolve them without ever reading that real bytecode
+      // directly -- which matters because javac's `-classpath` reader
+      // refuses to load class files newer than its own JDK, and the target
+      // may have been built with a newer one than the Metals server runs on.
+      val perTargetFileManagerFactory: JavaFileManagerFactory =
+        (standardFileManager, cp) =>
+          mbtWorkspaceSymbolProvider.createFileManagerFor(
+            buildTargetId.getUri(),
+            standardFileManager,
+            cp,
+          )
       configure(pc, search, completionItemPriority)
+        .withJavaFileManagerFactory(perTargetFileManagerFactory)
         .newInstance(
           buildTargetId.getUri(),
           classpath.asJava,

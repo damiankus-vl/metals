@@ -130,6 +130,27 @@ class MbtWorkspaceSymbolProvider(
     protobufLspConfig,
     clearAllProtobufCaches,
   )
+  private lazy val compiledOnlyOutlineProvider =
+    new MbtCompiledOnlyOutlineProvider(mbtBuild, workspace)
+
+  /**
+   * Like [[createFileManager]], but for a specific build target: the
+   * resulting file manager's `-sourcepath` listing also includes synthesized
+   * outlines for classes that exist only in `buildTargetId`'s own real
+   * compiled output (e.g. AutoValue/Lombok-generated classes with no `.java`
+   * source at all). See [[MbtCompiledOnlyOutlineProvider]].
+   */
+  def createFileManagerFor(
+      buildTargetId: String,
+      standardFileManager: StandardJavaFileManager,
+      classpath: ju.List[Path],
+  ): JavaFileManager =
+    new CompiledOnlyOutlineFileManager(
+      createFileManager(standardFileManager, classpath),
+      buildTargetId,
+      classpath.asScala.map(AbsolutePath(_)).toList,
+      compiledOnlyOutlineProvider,
+    )
 
   /**
    * The Java outlines synthesized from the given `.proto` file (one per
