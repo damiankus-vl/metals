@@ -1,10 +1,15 @@
 package tests.decompile
 
 import java.io.BufferedOutputStream
+import java.io.Writer
+import java.nio.charset.Charset
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.util.Locale
 import java.util.jar.JarOutputStream
 import java.util.zip.ZipEntry
+import javax.tools.DiagnosticListener
+import javax.tools.JavaFileObject
 import javax.tools.ToolProvider
 
 import scala.concurrent.Await
@@ -56,12 +61,28 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
 
     val outputDir = Files.createTempDirectory("nested-interface-classes")
     val compiler = ToolProvider.getSystemJavaCompiler()
-    val fileManager = compiler.getStandardFileManager(null, null, null)
+    val defaultDiagnosticListener: DiagnosticListener[JavaFileObject] = null
+    val defaultLocale: Locale = null
+    val defaultCharset: Charset = null
+    val fileManager = compiler.getStandardFileManager(
+      defaultDiagnosticListener,
+      defaultLocale,
+      defaultCharset,
+    )
     val sources =
       fileManager.getJavaFileObjectsFromPaths(List(sourceFile).asJava)
     val options = List("-d", outputDir.toString).asJava
+    val defaultWriter: Writer = null
+    val noClassesToProcess: java.lang.Iterable[String] = null
     val success = compiler
-      .getTask(null, fileManager, null, options, null, sources)
+      .getTask(
+        defaultWriter,
+        fileManager,
+        defaultDiagnosticListener,
+        options,
+        noClassesToProcess,
+        sources,
+      )
       .call()
     assert(success, "expected the fixture class to compile successfully")
 
