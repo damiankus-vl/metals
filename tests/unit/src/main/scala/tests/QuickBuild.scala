@@ -368,7 +368,7 @@ object QuickBuild {
 
     val repositories =
       // Repository.defaults().asScala ++
-      List(
+      additionalRepositories ::: List(
         Repository.central(),
         Repository.ivy2Local(),
         MavenRepository.of(

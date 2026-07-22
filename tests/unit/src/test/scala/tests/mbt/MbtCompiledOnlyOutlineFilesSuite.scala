@@ -11,7 +11,9 @@ class MbtCompiledOnlyOutlineFilesSuite extends munit.FunSuite {
   private def workspace(): AbsolutePath =
     AbsolutePath(Files.createTempDirectory("workspace"))
 
-  test("materializes an outline keyed by the build target hash and binary name") {
+  test(
+    "materializes an outline keyed by the build target hash and binary name"
+  ) {
     val ws = workspace()
     val result = MbtCompiledOnlyOutlineFiles.materialize(
       ws,
@@ -61,7 +63,9 @@ class MbtCompiledOnlyOutlineFilesSuite extends munit.FunSuite {
     )
   }
 
-  test("originBinaryClassName is None for a path outside the compiled-only tree") {
+  test(
+    "originBinaryClassName is None for a path outside the compiled-only tree"
+  ) {
     val ws = workspace()
     assertEquals(
       MbtCompiledOnlyOutlineFiles.originBinaryClassName(
@@ -72,7 +76,9 @@ class MbtCompiledOnlyOutlineFilesSuite extends munit.FunSuite {
     )
   }
 
-  test("originBuildTargetHash and originBinaryClassName agree on the same file") {
+  test(
+    "originBuildTargetHash and originBinaryClassName agree on the same file"
+  ) {
     val ws = workspace()
     val buildTargetId = "mbt://namespace/core"
     val javaFile = MbtCompiledOnlyOutlineFiles

@@ -1,16 +1,202 @@
 package tests
 
+import java.io.BufferedOutputStream
 import java.net.URI
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Paths
+import java.util.jar.JarOutputStream
+import java.util.zip.ZipEntry
 
 import scala.concurrent.Future
 
+import scala.meta.io.AbsolutePath
+
 import org.eclipse.lsp4j.MessageActionItem
+import org.objectweb.asm.Label
+import org.objectweb.asm.MethodVisitor
+import org.objectweb.asm.Opcodes
+import org.objectweb.asm.{ClassWriter => AsmClassWriter}
 
 class ThirdPartyDefinitionLspSuite
     extends BaseRangesSuite("third-party-definition") {
+
+  /**
+   * Publishes a tiny synthetic "third-party" dependency (a fabricated
+   * `com.example:testlib:1.0.0`, laid out as a real Maven repository under a
+   * temp directory) instead of fetching a real published library, so these
+   * tests exercise genuine third-party dependency navigation -- decompile,
+   * materialize, second-hop navigation, Turbine classpath fallback -- without
+   * depending on any actual open-source project. Returns the repo root's
+   * `file:` URI, suitable for a `metals.json` `repositories` entry.
+   */
+  private def publishTestLibrary(): String = {
+    def defaultConstructor(cw: AsmClassWriter): Unit = {
+      val ctor =
+        cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+      ctor.visitCode()
+      ctor.visitVarInsn(Opcodes.ALOAD, 0)
+      ctor.visitMethodInsn(
+        Opcodes.INVOKESPECIAL,
+        "java/lang/Object",
+        "<init>",
+        "()V",
+        false,
+      )
+      ctor.visitInsn(Opcodes.RETURN)
+      ctor.visitMaxs(1, 1)
+      ctor.visitEnd()
+    }
+
+    val optionBytes = {
+      val cw = new AsmClassWriter(0)
+      cw.visit(
+        Opcodes.V1_8,
+        Opcodes.ACC_PUBLIC + Opcodes.ACC_ANNOTATION + Opcodes.ACC_INTERFACE + Opcodes.ACC_ABSTRACT,
+        "com/example/lib/Option",
+        null,
+        "java/lang/Object",
+        Array("java/lang/annotation/Annotation"),
+      )
+      List("name", "usage").foreach { element =>
+        val mv = cw.visitMethod(
+          Opcodes.ACC_PUBLIC + Opcodes.ACC_ABSTRACT,
+          element,
+          "()Ljava/lang/String;",
+          null,
+          null,
+        )
+        mv.visitEnd()
+      }
+      cw.visitEnd()
+      cw.toByteArray
+    }
+
+    val cmdLineParserBytes = {
+      val cw = new AsmClassWriter(0)
+      cw.visit(
+        Opcodes.V1_8,
+        Opcodes.ACC_PUBLIC + Opcodes.ACC_SUPER,
+        "com/example/lib/CmdLineParser",
+        null,
+        "java/lang/Object",
+        null,
+      )
+      defaultConstructor(cw)
+      val parse =
+        cw.visitMethod(Opcodes.ACC_PUBLIC, "parse", "()V", null, null)
+      parse.visitCode()
+      parse.visitInsn(Opcodes.RETURN)
+      parse.visitMaxs(0, 1)
+      parse.visitEnd()
+      cw.visitEnd()
+      cw.toByteArray
+    }
+
+    val starterBytes = {
+      val cw = new AsmClassWriter(0)
+      cw.visit(
+        Opcodes.V1_8,
+        Opcodes.ACC_PUBLIC + Opcodes.ACC_SUPER,
+        "com/example/lib/Starter",
+        null,
+        "java/lang/Object",
+        null,
+      )
+      val field = cw.visitField(
+        Opcodes.ACC_PRIVATE,
+        "m",
+        "Ljava/lang/reflect/Method;",
+        null,
+        null,
+      )
+      field.visitEnd()
+      defaultConstructor(cw)
+      val mv: MethodVisitor = cw.visitMethod(
+        Opcodes.ACC_PUBLIC + Opcodes.ACC_STATIC,
+        "main",
+        "([Ljava/lang/String;)V",
+        null,
+        null,
+      )
+      mv.visitCode()
+      val start = new Label()
+      mv.visitLabel(start)
+      mv.visitInsn(Opcodes.ACONST_NULL)
+      mv.visitVarInsn(Opcodes.ASTORE, 1)
+      mv.visitVarInsn(Opcodes.ALOAD, 1)
+      mv.visitMethodInsn(
+        Opcodes.INVOKEVIRTUAL,
+        "com/example/lib/CmdLineParser",
+        "parse",
+        "()V",
+        false,
+      )
+      val end = new Label()
+      mv.visitLabel(end)
+      mv.visitInsn(Opcodes.RETURN)
+      mv.visitLocalVariable(
+        "args",
+        "[Ljava/lang/String;",
+        null,
+        start,
+        end,
+        0,
+      )
+      mv.visitLocalVariable(
+        "parser",
+        "Lcom/example/lib/CmdLineParser;",
+        null,
+        start,
+        end,
+        1,
+      )
+      mv.visitMaxs(1, 2)
+      mv.visitEnd()
+      cw.visitEnd()
+      cw.toByteArray
+    }
+
+    val repoRoot =
+      AbsolutePath(Files.createTempDirectory("testlib-maven-repo"))
+    val artifactDir = repoRoot
+      .resolve("com")
+      .resolve("example")
+      .resolve("testlib")
+      .resolve("1.0.0")
+    Files.createDirectories(artifactDir.toNIO)
+
+    Files.write(
+      artifactDir.resolve("testlib-1.0.0.pom").toNIO,
+      ("""|<project xmlns="http://maven.apache.org/POM/4.0.0">
+          |  <modelVersion>4.0.0</modelVersion>
+          |  <groupId>com.example</groupId>
+          |  <artifactId>testlib</artifactId>
+          |  <version>1.0.0</version>
+          |  <packaging>jar</packaging>
+          |</project>
+          |""".stripMargin).getBytes(StandardCharsets.UTF_8),
+    )
+
+    val out = new JarOutputStream(
+      new BufferedOutputStream(
+        Files.newOutputStream(artifactDir.resolve("testlib-1.0.0.jar").toNIO)
+      )
+    )
+    try {
+      List(
+        "com/example/lib/Option.class" -> optionBytes,
+        "com/example/lib/CmdLineParser.class" -> cmdLineParserBytes,
+        "com/example/lib/Starter.class" -> starterBytes,
+      ).foreach { case (entryName, bytes) =>
+        out.putNextEntry(new ZipEntry(entryName))
+        out.write(bytes)
+        out.closeEntry()
+      }
+    } finally out.close()
+
+    repoRoot.toNIO.toUri.toString
+  }
 
   test("declining-consent-yields-no-decompiled-definition") {
     cleanWorkspace()
@@ -21,29 +207,31 @@ class ThirdPartyDefinitionLspSuite
         params.getMessage().startsWith("Metals is about to decompile")
       )(new MessageActionItem("Cancel"))
     }
+    val repo = publishTestLibrary()
     for {
       _ <- initialize(
-        """|/metals.json
-           |{
-           |  "a": {
-           |    "libraryDependencies": [
-           |      "args4j:args4j:2.37"
-           |    ],
-           |    "skipSources": true
-           |  }
-           |}
-           |/a/src/main/scala/a/Main.scala
-           |package a
-           |import org.kohsuke.args4j.Starter
-           |object Main {
-           |  Starter.main(Array("--help"))
-           |}
-           |""".stripMargin
+        s"""|/metals.json
+            |{
+            |  "a": {
+            |    "repositories": ["$repo"],
+            |    "libraryDependencies": [
+            |      "com.example:testlib:1.0.0"
+            |    ],
+            |    "skipSources": true
+            |  }
+            |}
+            |/a/src/main/scala/a/Main.scala
+            |package a
+            |import com.example.lib.Starter
+            |object Main {
+            |  Starter.main(Array("--help"))
+            |}
+            |""".stripMargin
       )
       locations <- server.definition(
         "a/src/main/scala/a/Main.scala",
         """|package a
-           |import org.kohsuke.args4j.Sta@@rter
+           |import com.example.lib.Sta@@rter
            |object Main {
            |  Starter.main(Array("--help"))
            |}
@@ -61,23 +249,24 @@ class ThirdPartyDefinitionLspSuite
     """
       |/a/src/main/scala/a/Main.scala
       |package a
-      |import org.kohsuke.args4j.Option
+      |import com.example.lib.Option
       |object Main {
       |  @Opt@@ion(name="-r",usage="recursively run something")
       |  val option: Boolean = false
       |}
       |""".stripMargin,
     customMetalsJson = Some(
-      """
-        |{
-        |  "a": {
-        |    "libraryDependencies": [
-        |      "args4j:args4j:2.37"
-        |    ],
-        |    "skipSources": true
-        |  }
-        |}
-        |""".stripMargin
+      s"""
+         |{
+         |  "a": {
+         |    "repositories": ["${publishTestLibrary()}"],
+         |    "libraryDependencies": [
+         |      "com.example:testlib:1.0.0"
+         |    ],
+         |    "skipSources": true
+         |  }
+         |}
+         |""".stripMargin
     ),
   )
 
@@ -86,22 +275,23 @@ class ThirdPartyDefinitionLspSuite
     """
       |/a/src/main/scala/a/Main.scala
       |package a
-      |import org.kohsuke.args4j.Sta@@rter
+      |import com.example.lib.Sta@@rter
       |object Main {
       |  Starter.ma@@in(Array("--help"))
       |}
       |""".stripMargin,
     customMetalsJson = Some(
-      """
-        |{
-        |  "a": {
-        |    "libraryDependencies": [
-        |      "args4j:args4j:2.37"
-        |    ],
-        |    "skipSources": true
-        |  }
-        |}
-        |""".stripMargin
+      s"""
+         |{
+         |  "a": {
+         |    "repositories": ["${publishTestLibrary()}"],
+         |    "libraryDependencies": [
+         |      "com.example:testlib:1.0.0"
+         |    ],
+         |    "skipSources": true
+         |  }
+         |}
+         |""".stripMargin
     ),
   )
 
@@ -127,7 +317,7 @@ class ThirdPartyDefinitionLspSuite
         loc
           .getUri()
           .contains(
-            "dependencies/decompiled/args4j-2.37.jar/org/kohsuke/args4j"
+            "dependencies/decompiled/testlib-1.0.0.jar/com/example/lib"
           ),
         s"Expected definition location under the decompiled dependency tree, instead got: ${loc}",
       )
@@ -145,29 +335,31 @@ class ThirdPartyDefinitionLspSuite
     // navigate to a type it references, java.lang.reflect.Method, using the
     // file's real decompiled content rather than a synthetic stand-in.
     cleanWorkspace()
+    val repo = publishTestLibrary()
     for {
       _ <- initialize(
-        """|/metals.json
-           |{
-           |  "a": {
-           |    "libraryDependencies": [
-           |      "args4j:args4j:2.37"
-           |    ],
-           |    "skipSources": true
-           |  }
-           |}
-           |/a/src/main/scala/a/Main.scala
-           |package a
-           |import org.kohsuke.args4j.Starter
-           |object Main {
-           |  Starter.main(Array("--help"))
-           |}
-           |""".stripMargin
+        s"""|/metals.json
+            |{
+            |  "a": {
+            |    "repositories": ["$repo"],
+            |    "libraryDependencies": [
+            |      "com.example:testlib:1.0.0"
+            |    ],
+            |    "skipSources": true
+            |  }
+            |}
+            |/a/src/main/scala/a/Main.scala
+            |package a
+            |import com.example.lib.Starter
+            |object Main {
+            |  Starter.main(Array("--help"))
+            |}
+            |""".stripMargin
       )
       firstHop <- server.definition(
         "a/src/main/scala/a/Main.scala",
         """|package a
-           |import org.kohsuke.args4j.Sta@@rter
+           |import com.example.lib.Sta@@rter
            |object Main {
            |  Starter.main(Array("--help"))
            |}
@@ -182,7 +374,7 @@ class ThirdPartyDefinitionLspSuite
           loc
             .getUri()
             .endsWith(
-              "dependencies/decompiled/args4j-2.37.jar/org/kohsuke/args4j/Starter.java"
+              "dependencies/decompiled/testlib-1.0.0.jar/com/example/lib/Starter.java"
             ),
           s"expected the materialized Starter.java, instead got: $loc",
         )
@@ -226,29 +418,31 @@ class ThirdPartyDefinitionLspSuite
     // the same jar (Starter -> CmdLineParser) used to silently fail. Verify
     // that navigation now succeeds.
     cleanWorkspace()
+    val repo = publishTestLibrary()
     for {
       _ <- initialize(
-        """|/metals.json
-           |{
-           |  "a": {
-           |    "libraryDependencies": [
-           |      "args4j:args4j:2.37"
-           |    ],
-           |    "skipSources": true
-           |  }
-           |}
-           |/a/src/main/scala/a/Main.scala
-           |package a
-           |import org.kohsuke.args4j.Starter
-           |object Main {
-           |  Starter.main(Array("--help"))
-           |}
-           |""".stripMargin
+        s"""|/metals.json
+            |{
+            |  "a": {
+            |    "repositories": ["$repo"],
+            |    "libraryDependencies": [
+            |      "com.example:testlib:1.0.0"
+            |    ],
+            |    "skipSources": true
+            |  }
+            |}
+            |/a/src/main/scala/a/Main.scala
+            |package a
+            |import com.example.lib.Starter
+            |object Main {
+            |  Starter.main(Array("--help"))
+            |}
+            |""".stripMargin
       )
       firstHop <- server.definition(
         "a/src/main/scala/a/Main.scala",
         """|package a
-           |import org.kohsuke.args4j.Sta@@rter
+           |import com.example.lib.Sta@@rter
            |object Main {
            |  Starter.main(Array("--help"))
            |}
@@ -284,7 +478,7 @@ class ThirdPartyDefinitionLspSuite
         loc
           .getUri()
           .endsWith(
-            "dependencies/decompiled/args4j-2.37.jar/org/kohsuke/args4j/CmdLineParser.java"
+            "dependencies/decompiled/testlib-1.0.0.jar/com/example/lib/CmdLineParser.java"
           ),
         s"expected navigating further to the materialized CmdLineParser.java, instead got: $loc",
       )

@@ -20,7 +20,10 @@ class MbtCompiledOnlyOutlineProviderSuite extends munit.FunSuite {
   private val buildTargetId = "mbt://namespace/core"
 
   /** A trivial but real, CFR-decompilable top-level class. */
-  private def writeClass(dir: java.nio.file.Path, internalName: String): Unit = {
+  private def writeClass(
+      dir: java.nio.file.Path,
+      internalName: String,
+  ): Unit = {
     val cw = new ClassWriter(0)
     cw.visit(
       Opcodes.V1_8,

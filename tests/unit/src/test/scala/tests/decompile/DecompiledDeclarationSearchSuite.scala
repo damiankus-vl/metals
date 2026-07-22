@@ -1,5 +1,10 @@
 package tests.decompile
 
+import java.io.BufferedOutputStream
+import java.nio.file.Files
+import java.util.jar.JarOutputStream
+import java.util.zip.ZipEntry
+
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
@@ -12,14 +17,95 @@ import scala.meta.internal.metals.decompile.DecompileBytecode
 import scala.meta.internal.metals.decompile.DecompiledDeclarationSearch
 import scala.meta.internal.mtags.Mtags
 import scala.meta.internal.{semanticdb => s}
+import scala.meta.io.AbsolutePath
 
-import coursierapi.Dependency
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Opcodes
 import tests.BuildInfoVersions
 import tests.Library
 
 class DecompiledDeclarationSearchSuite extends munit.FunSuite {
 
   implicit val ec: ExecutionContext = ExecutionContext.global
+
+  /**
+   * Writes a jar with a top-level `com/example/Outer` class and a real
+   * nested public interface `com/example/Outer$Inner` (an `InnerClasses`
+   * attribute on both class files, mirroring what real javac emits), so
+   * tests can exercise CFR's differing behavior when decompiling the nested
+   * type alone vs. decompiling its enclosing class whole.
+   */
+  private def writeNestedInterfaceJar(): AbsolutePath = {
+    val outerInternalName = "com/example/Outer"
+    val innerSimpleName = "Inner"
+    val innerInternalName = s"$outerInternalName$$$innerSimpleName"
+    val innerAccess =
+      Opcodes.ACC_PUBLIC + Opcodes.ACC_STATIC + Opcodes.ACC_ABSTRACT + Opcodes.ACC_INTERFACE
+
+    val outerWriter = new ClassWriter(0)
+    outerWriter.visit(
+      Opcodes.V1_8,
+      Opcodes.ACC_PUBLIC + Opcodes.ACC_SUPER,
+      outerInternalName,
+      null,
+      "java/lang/Object",
+      null,
+    )
+    outerWriter.visitInnerClass(
+      innerInternalName,
+      outerInternalName,
+      innerSimpleName,
+      innerAccess,
+    )
+    val ctor =
+      outerWriter.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
+    ctor.visitCode()
+    ctor.visitVarInsn(Opcodes.ALOAD, 0)
+    ctor.visitMethodInsn(
+      Opcodes.INVOKESPECIAL,
+      "java/lang/Object",
+      "<init>",
+      "()V",
+      false,
+    )
+    ctor.visitInsn(Opcodes.RETURN)
+    ctor.visitMaxs(1, 1)
+    ctor.visitEnd()
+    outerWriter.visitEnd()
+
+    val innerWriter = new ClassWriter(0)
+    innerWriter.visit(
+      Opcodes.V1_8,
+      innerAccess,
+      innerInternalName,
+      null,
+      "java/lang/Object",
+      null,
+    )
+    innerWriter.visitInnerClass(
+      innerInternalName,
+      outerInternalName,
+      innerSimpleName,
+      innerAccess,
+    )
+    innerWriter.visitEnd()
+
+    val jar =
+      AbsolutePath(Files.createTempDirectory("nested-interface-jar"))
+        .resolve("lib.jar")
+    val out = new JarOutputStream(
+      new BufferedOutputStream(Files.newOutputStream(jar.toNIO))
+    )
+    try {
+      out.putNextEntry(new ZipEntry(s"$outerInternalName.class"))
+      out.write(outerWriter.toByteArray)
+      out.closeEntry()
+      out.putNextEntry(new ZipEntry(s"$innerInternalName.class"))
+      out.write(innerWriter.toByteArray)
+      out.closeEntry()
+    } finally out.close()
+    jar
+  }
 
   test("finds a class labeled `class Outer.Inner`") {
     // CFR's real (if invalid-Java) label for a nested class decompiled alone.
@@ -65,21 +151,15 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
   test(
     "locates the real CFR output for a nested interface decompiled in isolation"
   ) {
-    // Regression test: go-to-definition on a nested classpath type (e.g.
-    // `Descriptors.Descriptor` in protobuf-java) landed on line 0, because CFR
-    // labels an isolated nested type `interface Outer.Inner`, which mtags
-    // can't index. args4j's `OptionHandlerRegistry.OptionHandlerFactory` has
-    // the same shape and is already a test dependency elsewhere.
-    val jar = Library
-      .fetch(Dependency.of("args4j", "args4j", "2.37"))
-      .headOption
-      .getOrElse(fail("could not resolve args4j:args4j:2.37"))
+    // Regression test: go-to-definition on a nested classpath type landed on
+    // line 0, because CFR labels an isolated nested type `interface
+    // Outer.Inner`, which mtags can't index.
+    val jar = writeNestedInterfaceJar()
 
-    val symbol =
-      "org/kohsuke/args4j/OptionHandlerRegistry#OptionHandlerFactory#"
+    val symbol = "com/example/Outer#Inner#"
     val decompiled = Await.result(
       DecompileBytecode.cfr.decompile(
-        "org.kohsuke.args4j.OptionHandlerRegistry$OptionHandlerFactory",
+        "com.example.Outer$Inner",
         List(jar),
       ),
       30.seconds,
@@ -89,14 +169,14 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
     // If this ever fails, CFR changed its labeling and this fallback (and
     // test) can be removed.
     assert(
-      code.contains("OptionHandlerRegistry.OptionHandlerFactory"),
+      code.contains("Outer.Inner"),
       s"expected CFR's `Outer.Inner` labeling, got:\n$code",
     )
 
     val location = DecompiledDeclarationSearch.declarationLocation(
       code,
       symbol,
-      "jar:file:///args4j.jar!/org/kohsuke/args4j/OptionHandlerRegistry$OptionHandlerFactory.class",
+      "jar:file:///lib.jar!/com/example/Outer$Inner.class",
     )
 
     assert(
@@ -118,16 +198,12 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
     // labeling above: CFR then renders valid, correctly nested Java, so
     // mtags' javac-based indexer finds the definition directly, no
     // text-search fallback needed.
-    val jar = Library
-      .fetch(Dependency.of("args4j", "args4j", "2.37"))
-      .headOption
-      .getOrElse(fail("could not resolve args4j:args4j:2.37"))
+    val jar = writeNestedInterfaceJar()
 
-    val symbol =
-      "org/kohsuke/args4j/OptionHandlerRegistry#OptionHandlerFactory#"
+    val symbol = "com/example/Outer#Inner#"
     val decompiled = Await.result(
       DecompileBytecode.cfr.decompile(
-        "org.kohsuke.args4j.OptionHandlerRegistry",
+        "com.example.Outer",
         List(jar),
       ),
       30.seconds,
@@ -136,7 +212,7 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
 
     implicit val rc: ReportContext = EmptyReportContext
     val doc = new Mtags().index(
-      Input.VirtualFile("OptionHandlerRegistry.java", code),
+      Input.VirtualFile("Outer.java", code),
       dialects.Scala213,
     )
     val occurrence = doc.occurrences.find(occ =>
