@@ -1,13 +1,16 @@
 package tests.decompile
 
 import java.io.BufferedOutputStream
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.util.jar.JarOutputStream
 import java.util.zip.ZipEntry
+import javax.tools.ToolProvider
 
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
+import scala.jdk.CollectionConverters._
 
 import scala.meta.dialects
 import scala.meta.inputs.Input
@@ -19,8 +22,6 @@ import scala.meta.internal.mtags.Mtags
 import scala.meta.internal.{semanticdb => s}
 import scala.meta.io.AbsolutePath
 
-import org.objectweb.asm.ClassWriter
-import org.objectweb.asm.Opcodes
 import tests.BuildInfoVersions
 import tests.Library
 
@@ -29,66 +30,40 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
   implicit val ec: ExecutionContext = ExecutionContext.global
 
   /**
-   * Writes a jar with a top-level `com/example/Outer` class and a real
-   * nested public interface `com/example/Outer$Inner` (an `InnerClasses`
-   * attribute on both class files, mirroring what real javac emits), so
-   * tests can exercise CFR's differing behavior when decompiling the nested
-   * type alone vs. decompiling its enclosing class whole.
+   * Compiles a real `com.example.Outer` class with a nested public
+   * interface `Inner` via the real `javac`, then packs the output into a
+   * jar (CFR's classpath resolution has trouble with bare directory
+   * classpath entries), so tests can exercise CFR's differing behavior when
+   * decompiling the nested type alone vs. decompiling its enclosing class
+   * whole -- against genuine compiler output rather than hand-built
+   * bytecode.
    */
-  private def writeNestedInterfaceJar(): AbsolutePath = {
-    val outerInternalName = "com/example/Outer"
-    val innerSimpleName = "Inner"
-    val innerInternalName = s"$outerInternalName$$$innerSimpleName"
-    val innerAccess =
-      Opcodes.ACC_PUBLIC + Opcodes.ACC_STATIC + Opcodes.ACC_ABSTRACT + Opcodes.ACC_INTERFACE
+  private def compileNestedInterfaceClasses(): AbsolutePath = {
+    val sourceRoot = Files.createTempDirectory("nested-interface-src")
+    val packageDir = sourceRoot.resolve("com").resolve("example")
+    Files.createDirectories(packageDir)
+    val sourceFile = packageDir.resolve("Outer.java")
+    Files.write(
+      sourceFile,
+      """|package com.example;
+         |
+         |public class Outer {
+         |  public interface Inner {
+         |  }
+         |}
+         |""".stripMargin.getBytes(StandardCharsets.UTF_8),
+    )
 
-    val outerWriter = new ClassWriter(0)
-    outerWriter.visit(
-      Opcodes.V1_8,
-      Opcodes.ACC_PUBLIC + Opcodes.ACC_SUPER,
-      outerInternalName,
-      null,
-      "java/lang/Object",
-      null,
-    )
-    outerWriter.visitInnerClass(
-      innerInternalName,
-      outerInternalName,
-      innerSimpleName,
-      innerAccess,
-    )
-    val ctor =
-      outerWriter.visitMethod(Opcodes.ACC_PUBLIC, "<init>", "()V", null, null)
-    ctor.visitCode()
-    ctor.visitVarInsn(Opcodes.ALOAD, 0)
-    ctor.visitMethodInsn(
-      Opcodes.INVOKESPECIAL,
-      "java/lang/Object",
-      "<init>",
-      "()V",
-      false,
-    )
-    ctor.visitInsn(Opcodes.RETURN)
-    ctor.visitMaxs(1, 1)
-    ctor.visitEnd()
-    outerWriter.visitEnd()
-
-    val innerWriter = new ClassWriter(0)
-    innerWriter.visit(
-      Opcodes.V1_8,
-      innerAccess,
-      innerInternalName,
-      null,
-      "java/lang/Object",
-      null,
-    )
-    innerWriter.visitInnerClass(
-      innerInternalName,
-      outerInternalName,
-      innerSimpleName,
-      innerAccess,
-    )
-    innerWriter.visitEnd()
+    val outputDir = Files.createTempDirectory("nested-interface-classes")
+    val compiler = ToolProvider.getSystemJavaCompiler()
+    val fileManager = compiler.getStandardFileManager(null, null, null)
+    val sources =
+      fileManager.getJavaFileObjectsFromPaths(List(sourceFile).asJava)
+    val options = List("-d", outputDir.toString).asJava
+    val success = compiler
+      .getTask(null, fileManager, null, options, null, sources)
+      .call()
+    assert(success, "expected the fixture class to compile successfully")
 
     val jar =
       AbsolutePath(Files.createTempDirectory("nested-interface-jar"))
@@ -97,12 +72,20 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
       new BufferedOutputStream(Files.newOutputStream(jar.toNIO))
     )
     try {
-      out.putNextEntry(new ZipEntry(s"$outerInternalName.class"))
-      out.write(outerWriter.toByteArray)
-      out.closeEntry()
-      out.putNextEntry(new ZipEntry(s"$innerInternalName.class"))
-      out.write(innerWriter.toByteArray)
-      out.closeEntry()
+      List("Outer.class", "Outer$Inner.class").foreach { classFileName =>
+        out.putNextEntry(new ZipEntry(s"com/example/$classFileName"))
+        out.write(
+          Files.readAllBytes(
+            outputDir
+              .resolve("com")
+              .resolve("example")
+              .resolve(
+                classFileName
+              )
+          )
+        )
+        out.closeEntry()
+      }
     } finally out.close()
     jar
   }
@@ -154,13 +137,13 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
     // Regression test: go-to-definition on a nested classpath type landed on
     // line 0, because CFR labels an isolated nested type `interface
     // Outer.Inner`, which mtags can't index.
-    val jar = writeNestedInterfaceJar()
+    val classpathDir = compileNestedInterfaceClasses()
 
     val symbol = "com/example/Outer#Inner#"
     val decompiled = Await.result(
       DecompileBytecode.cfr.decompile(
         "com.example.Outer$Inner",
-        List(jar),
+        List(classpathDir),
       ),
       30.seconds,
     )
@@ -198,13 +181,13 @@ class DecompiledDeclarationSearchSuite extends munit.FunSuite {
     // labeling above: CFR then renders valid, correctly nested Java, so
     // mtags' javac-based indexer finds the definition directly, no
     // text-search fallback needed.
-    val jar = writeNestedInterfaceJar()
+    val classpathDir = compileNestedInterfaceClasses()
 
     val symbol = "com/example/Outer#Inner#"
     val decompiled = Await.result(
       DecompileBytecode.cfr.decompile(
         "com.example.Outer",
-        List(jar),
+        List(classpathDir),
       ),
       30.seconds,
     )
