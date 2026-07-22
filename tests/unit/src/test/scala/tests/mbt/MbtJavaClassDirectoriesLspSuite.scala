@@ -464,7 +464,9 @@ class MbtJavaClassDirectoriesLspSuite
       found match {
         case Some(path) => path.toUri.toString
         case None =>
-          fail(s"no materialized compiled-only outline found for $simpleClassName under $root")
+          fail(
+            s"no materialized compiled-only outline found for $simpleClassName under $root"
+          )
       }
     } finally stream.close()
   }

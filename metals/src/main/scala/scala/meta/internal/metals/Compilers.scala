@@ -162,6 +162,36 @@ class Compilers(
   private val outlineFilesProvider =
     new OutlineFilesProvider(buildTargets, buffers)
 
+  /**
+   * Reverse-routing a materialized decompiled/compiled-only outline path back
+   * to its owning build target requires scanning every build target (see
+   * [[decompiledJavaTarget]]/[[compiledOnlyOutlineTarget]] below), which is
+   * otherwise repeated on every request touching such a path. The mapping is
+   * stable for the lifetime of a build import, so memoize it; both caches are
+   * cleared in [[cancel]], which already runs on every reimport in lockstep
+   * with `TargetData.reset()`.
+   */
+  private val decompiledJavaTargetCache =
+    new TrieMap[AbsolutePath, Option[BuildTargetIdentifier]]()
+  private val compiledOnlyOutlineTargetCache =
+    new TrieMap[AbsolutePath, Option[BuildTargetIdentifier]]()
+
+  /**
+   * `TrieMap#getOrElseUpdate` doesn't guarantee `compute` runs at most once
+   * under a race (unlike `jcache` above, that's exactly why loading a
+   * presentation compiler isn't cached this way). That's fine here: `compute`
+   * is a pure, non-reentrant read of already-in-memory `BuildTargets` data, so
+   * a lost race just recomputes the same answer twice instead of loading a
+   * duplicate expensive resource.
+   */
+  private def memoizedBuildTarget(
+      cache: TrieMap[AbsolutePath, Option[BuildTargetIdentifier]],
+      path: AbsolutePath,
+  )(
+      compute: AbsolutePath => Option[BuildTargetIdentifier]
+  ): Option[BuildTargetIdentifier] =
+    cache.getOrElseUpdate(path, compute(path))
+
   private val presentationCompilerCache = CacheBuilder
     .newBuilder()
     .maximumSize(32)
@@ -320,6 +350,8 @@ class Compilers(
     presentationCompilerWorksheetsCache.invalidateAll()
     worksheetsDigests.clear()
     outlineFilesProvider.clear()
+    decompiledJavaTargetCache.clear()
+    compiledOnlyOutlineTargetCache.clear()
   }
 
   def restartAll(): Unit = {
@@ -1797,6 +1829,13 @@ class Compilers(
   private def decompiledJavaTarget(
       path: AbsolutePath
   ): Option[BuildTargetIdentifier] =
+    memoizedBuildTarget(decompiledJavaTargetCache, path)(
+      computeDecompiledJavaTarget
+    )
+
+  private def computeDecompiledJavaTarget(
+      path: AbsolutePath
+  ): Option[BuildTargetIdentifier] =
     DecompiledJavaFiles.jarFileNameOf(workspace, path).flatMap { jarFileName =>
       buildTargets.allWorkspaceJars
         .find(_.filename == jarFileName)
@@ -1817,6 +1856,13 @@ class Compilers(
    * synthesizes none of them.
    */
   private def compiledOnlyOutlineTarget(
+      path: AbsolutePath
+  ): Option[BuildTargetIdentifier] =
+    memoizedBuildTarget(compiledOnlyOutlineTargetCache, path)(
+      computeCompiledOnlyOutlineTarget
+    )
+
+  private def computeCompiledOnlyOutlineTarget(
       path: AbsolutePath
   ): Option[BuildTargetIdentifier] =
     MbtCompiledOnlyOutlineFiles.buildTargetHashFor(workspace, path).flatMap {
