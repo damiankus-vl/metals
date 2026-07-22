@@ -5,6 +5,7 @@ import java.nio.file.Path
 import java.nio.file.Paths
 
 import scala.annotation.tailrec
+import scala.collection.concurrent.TrieMap
 import scala.util.control.NonFatal
 
 import scala.meta.internal.io.FileIO
@@ -66,17 +67,29 @@ final class ClassFileHierarchyIndex(
     else if (entry.isDirectory) readFromDirectory(entry, relativeClassPath)
     else None
 
+  // `FileIO.withJarFileSystem` resolves its filesystem through the JDK's own
+  // `FileSystems.getFileSystem(uri)`, which -- even on a cache hit -- calls
+  // `UnixPath.toRealPath` to recompute its lookup key, issuing real `realpath`
+  // syscalls every time. `readClassFileFrom` calls this once per classpath
+  // entry checked (hit or miss) for every class visited during a hierarchy
+  // walk, so on a large classpath this dominates: profiling a single
+  // goto-definition landed a third of all sampled CPU time in that syscall.
+  // Caching the resolved root ourselves, keyed by jar path, skips the JDK's
+  // expensive re-lookup on every subsequent access to the same jar.
+  private val jarRootCache = new TrieMap[AbsolutePath, AbsolutePath]()
+
+  private def jarRoot(jar: AbsolutePath): AbsolutePath =
+    jarRootCache.getOrElseUpdate(jar, FileIO.jarRootPath(jar))
+
   private def readFromJar(
       jar: AbsolutePath,
       relativeClassPath: Path,
   ): Option[(String, Array[Byte])] =
     try {
-      FileIO.withJarFileSystem(jar, create = false) { root =>
-        val classFile = root.resolveZipPath(relativeClassPath)
-        Option.when(classFile.exists)(
-          classFile.toURI.toString -> Files.readAllBytes(classFile.toNIO)
-        )
-      }
+      val classFile = jarRoot(jar).resolveZipPath(relativeClassPath)
+      Option.when(classFile.exists)(
+        classFile.toURI.toString -> Files.readAllBytes(classFile.toNIO)
+      )
     } catch {
       case NonFatal(_) => None
     }

@@ -604,8 +604,8 @@ class MbtWorkspaceSymbolProvider(
     documents.get(file)
   }
 
-  def definition(symbol: String): List[l.Location] = {
-    val result = (for {
+  def definition(symbol: String): List[l.Location] =
+    (for {
       file <- documentsByPackage
         .getOrElse(
           Symbol(symbol).enclosingPackage.value,
@@ -631,8 +631,6 @@ class MbtWorkspaceSymbolProvider(
         ),
       )
     }).toList
-    result
-  }
 
   /**
    * Finds the proto RPC definition for a gRPC stub method symbol.

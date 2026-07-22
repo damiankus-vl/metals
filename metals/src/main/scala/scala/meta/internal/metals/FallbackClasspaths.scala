@@ -139,10 +139,29 @@ class FallbackClasspaths(
     build.getDependencyModules.asScala.iterator.flatMap(_.jarPath).toSeq
   }
 
+  // `MbtBuild.allClassDirectories` fully rebuilds every namespace's target
+  // info on every access (dependency-graph resolution, glob matcher
+  // compilation, re-emitting "unknown dependency module" warnings) -- and
+  // this method is called on every `decompileAndLocate` (goto-definition
+  // into any external/decompiled classpath-only class). Cache the result,
+  // invalidated by `MbtBuild` reference identity: a reimport replaces the
+  // whole instance rather than mutating one in place, so this needs no
+  // explicit invalidation hook. `@volatile` for safe cross-thread publication
+  // of this single-slot cache; a lost race just recomputes once more.
+  @volatile private var classDirectoriesCache: Option[(MbtBuild, Seq[Path])] =
+    None
+
   override def classDirectories(): Seq[Path] =
-    if (fallbackClasspathsConfig().isMbt)
-      mbtBuild().allClassDirectories(workspace).map(_.toNIO)
-    else Nil
+    if (fallbackClasspathsConfig().isMbt) {
+      val build = mbtBuild()
+      classDirectoriesCache match {
+        case Some((cachedBuild, dirs)) if cachedBuild eq build => dirs
+        case _ =>
+          val dirs = build.allClassDirectories(workspace).map(_.toNIO)
+          classDirectoriesCache = Some((build, dirs))
+          dirs
+      }
+    } else Nil
 
   private def guessClasspath(): Seq[Path] = {
     if (!fallbackClasspathsConfig().isGuessed) {

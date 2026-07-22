@@ -11,6 +11,7 @@ import javax.tools.JavaFileObject
 import javax.tools.JavaFileObject.Kind
 import javax.tools.SimpleJavaFileObject
 
+import scala.collection.concurrent.TrieMap
 import scala.concurrent.Await
 import scala.concurrent.duration._
 import scala.util.control.NonFatal
@@ -107,6 +108,32 @@ final class MbtCompiledOnlyOutlineProvider(
   private val cache =
     new ConcurrentHashMap[(String, String), JavaFileObject]()
 
+  // `MbtBuild.mbtTargets` fully rebuilds every namespace's target info
+  // (dependency-graph resolution, glob matcher compilation, and re-emitting
+  // any "unknown dependency module" warnings) on every access -- it can't be
+  // cached on `MbtBuild` itself since that case class is serialized via Gson
+  // reflection elsewhere (`MbtBuildSuite`), and a cached field would leak
+  // into that JSON. Cache the per-target result here instead, invalidated by
+  // reference identity: a reimport replaces the whole `MbtBuild` instance
+  // rather than mutating one in place, so `cachedBuild ne build` is enough
+  // to detect staleness without any explicit invalidation hook.
+  private val classDirectoriesCache =
+    new TrieMap[String, (MbtBuild, Seq[AbsolutePath])]()
+
+  private def classDirectoriesFor(buildTargetId: String): Seq[AbsolutePath] = {
+    val build = mbtBuild()
+    classDirectoriesCache.get(buildTargetId) match {
+      case Some((cachedBuild, dirs)) if cachedBuild eq build => dirs
+      case _ =>
+        val dirs = build.classDirectoriesFor(
+          new BuildTargetIdentifier(buildTargetId),
+          workspace,
+        )
+        classDirectoriesCache.put(buildTargetId, (build, dirs))
+        dirs
+    }
+  }
+
   /**
    * Synthesized outlines for every top-level, compiled-only class declared
    * directly in `packageName` (slash-separated, no trailing slash) for
@@ -118,11 +145,7 @@ final class MbtCompiledOnlyOutlineProvider(
       packageName: String,
       dependencyClasspath: Seq[AbsolutePath],
   ): Iterator[JavaFileObject] = {
-    val classDirs =
-      mbtBuild().classDirectoriesFor(
-        new BuildTargetIdentifier(buildTargetId),
-        workspace,
-      )
+    val classDirs = classDirectoriesFor(buildTargetId)
     if (classDirs.isEmpty) Iterator.empty
     else {
       val fullClasspath = (classDirs ++ dependencyClasspath).toList
