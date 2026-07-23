@@ -2,9 +2,9 @@ package tests.j
 
 import scala.meta.internal.metals.MetalsEnrichments._
 
-import coursierapi.Dependency
-import coursierapi.Fetch
 import org.eclipse.{lsp4j => l}
+import tests.BuildInfo
+import tests.MbtJsonBuilder
 
 class JavaPCDiagnosticsSuite extends BaseJavaPCSuite("java-pc-diagnostics") {
 
@@ -417,30 +417,9 @@ class JavaPCDiagnosticsSuite extends BaseJavaPCSuite("java-pc-diagnostics") {
   test("mbt-java-deps".tag(JavacSourcepath)) {
     cleanWorkspace()
     val mainFile = "Main.java"
-    // Resolve the Guava dependency jars using Coursier
-    val guavaDep = Dependency.of("com.google.guava", "guava", "33.5.0-jre")
-    val fetched = Fetch
-      .create()
-      .withMainArtifacts()
-      .addClassifiers("sources")
-      .withDependencies(guavaDep)
-      .fetch()
-      .asScala
-      .map(_.toPath)
-      .toList
-    val (sourceJars, classJars) =
-      fetched.partition(_.getFileName.toString.endsWith("-sources.jar"))
-
-    val mbtJson =
-      s"""|{
-          |  "dependencyModules": [
-          |    {
-          |      "id": "com.google.guava:guava:33.5.0-jre",
-          |      "jar": "${classJars.head.toUri().toString()}",
-          |      "sources": "${sourceJars.head.toUri().toString()}"
-          |    }
-          |  ]
-          |}""".stripMargin
+    val mbtJson = new MbtJsonBuilder(BuildInfo.scalaVersion)
+      .addJavaDependency("com.google.guava", "guava", "33.5.0-jre")
+      .build()
     val fileInput =
       """|package a;
          |
