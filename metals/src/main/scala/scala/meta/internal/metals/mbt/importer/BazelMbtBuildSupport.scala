@@ -223,6 +223,48 @@ object BazelMbtBuildSupport {
     }
   }
 
+  /**
+   * Splits a Bazel target label into (apparent repo name, package path,
+   * target name), e.g. `@com_google_protobuf//java/core:core` ->
+   * `("com_google_protobuf", "java/core", "core")`, or `//pkg:name` ->
+   * `("", "pkg", "name")`. Shared by `moduleIdFromTargetLabel` and by the
+   * external-output-path resolution in `BazelMbtImporter`, which both need
+   * to take a label apart the same way.
+   */
+  def parseTargetLabel(label: String): Option[(String, String, String)] = {
+    val stripped = label.stripPrefix("@@").stripPrefix("@")
+    val slashSlash = stripped.indexOf("//")
+    if (slashSlash < 0) None
+    else {
+      val repo = stripped.substring(0, slashSlash)
+      val rest = stripped.substring(slashSlash + 2)
+      val colon = rest.lastIndexOf(':')
+      if (colon < 0 || colon == rest.length - 1) None
+      else {
+        val pkg = rest.substring(0, colon)
+        val name = rest.substring(colon + 1)
+        Some((repo, pkg, name))
+      }
+    }
+  }
+
+  /**
+   * Synthesize a stable module id for a Bazel *target* label (as opposed to
+   * `BazelMbtImporter.moduleIdFromJarLabel`, which is for jar *file* labels).
+   * Handles both main-workspace (`//pkg:name`) and external (`@repo//pkg:name`)
+   * labels, e.g. `@com_google_protobuf//:protobuf_java` ->
+   * `com_google_protobuf:protobuf_java:local`. Deliberately not
+   * built on `fileLabelToWorkspaceRelativePath`: that helper requires a
+   * `//`-prefixed label and has a root-package quirk that's wrong for the
+   * common `@repo//:name` shape these external deps almost always use.
+   */
+  def moduleIdFromTargetLabel(label: String): Option[String] =
+    parseTargetLabel(label).map { case (repo, pkg, name) =>
+      val org =
+        Seq(repo, pkg.replace('/', '.')).filter(_.nonEmpty).mkString(".")
+      s"${if (org.isEmpty) "root" else org}:$name:local"
+    }
+
   private def computeDependsOn(
       granularity: BazelMbtNamespaceMode,
       targetLabels: List[String],

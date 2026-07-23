@@ -1785,7 +1785,8 @@ class Compilers(
           else if (path.isJavaFilename && forceScala)
             loadCompiler(value)
               .orElse(loadJavaCompiler(value))
-          else if (path.isJavaFilename) loadJavaCompiler(value)
+          else if (path.isJavaFilename)
+            loadJavaCompiler(value)
           else None
       }
     }
@@ -1997,15 +1998,20 @@ class Compilers(
   private def loadJavaCompiler(
       targetId: BuildTargetIdentifier
   ): Option[PresentationCompiler] = {
+    val key = PresentationCompilerKey.JavaBuildTarget(targetId)
     buildTargets.jvmTarget(targetId).map { javaTarget =>
       jcache
         .computeIfAbsent(
-          PresentationCompilerKey.JavaBuildTarget(targetId),
+          key,
           { _ =>
             workDoneProgress.trackBlocking(
               s"${config.icons().sync}Loading presentation compiler"
             ) {
-              JavaLazyCompiler(javaTarget, search, completionItemPriority())
+              JavaLazyCompiler(
+                javaTarget,
+                search,
+                completionItemPriority(),
+              )
             }
           },
         )

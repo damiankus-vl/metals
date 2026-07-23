@@ -120,6 +120,45 @@ class BazelTargetsXmlDump(xmlDump: String) {
   private def isExternalDep(label: String): Boolean =
     label.startsWith("@") && !label.startsWith("@@")
 
+  /**
+   * Rule classes for dependency-producing nodes that Query 1's project-view-
+   * scoped, kind-restricted discovery can never find directly: main-workspace
+   * `java_proto_library`/`java_lite_proto_library` (excluded from
+   * `BazelQuery.ruleKinds`), and `alias`/`java_library` (typically
+   * external-repo bzlmod targets like `@com_google_protobuf//:protobuf_java`
+   * -- confirmed to literally be an `alias` rule, not `java_library`; `bazel
+   * cquery` resolves `alias` targets to their `actual` transparently, so no
+   * manual chasing is needed here). Deliberately excludes bare `proto_library`
+   * (no jar output of its own; the BFS in `reachableLabels` already walks
+   * through it regardless of this allowlist, so omitting it doesn't block
+   * reaching a java_proto_library/alias beyond it).
+   */
+  val extraDependencyRuleClasses: Set[String] =
+    Set(
+      "java_proto_library",
+      "java_lite_proto_library",
+      "java_library",
+      "alias",
+    )
+
+  /**
+   * Labels reachable from any known target (via the already-computed
+   * `reachableLabelsByTarget`) that are themselves neither a known target nor
+   * a source file, but whose rule class is in [[extraDependencyRuleClasses]].
+   * These need their own compiled jar resolved via `cquery` and exposed as a
+   * synthetic `MbtDependencyModule`, not a full namespace.
+   */
+  def extraDependencyLabels(
+      reachableLabelsByTarget: Map[String, List[String]],
+      knownTargets: Set[String],
+  ): Set[String] =
+    reachableLabelsByTarget.valuesIterator.flatten.toSet
+      .filterNot(knownTargets)
+      .filterNot(sourceFileLabels)
+      .filter(label =>
+        ruleClassesByTarget.get(label).exists(extraDependencyRuleClasses)
+      )
+
   private def isImportRule(rule: scala.xml.Node): Boolean = {
     val cls = (rule \ "@class").text
     cls == "java_import" || cls == "scala_import"
