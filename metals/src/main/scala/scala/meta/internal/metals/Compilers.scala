@@ -647,8 +647,8 @@ class Compilers(
    *
    * Unlike a Java compiler restart, this has to drop the cache entry rather
    * than call `restart()`: a Scala compiler resolves proto-generated classes
-   * from a materialized classpath directory computed once when the compiler
-   * was constructed, so only a rebuild picks up proto changes.
+   * through a source path computed once when the compiler was constructed, so
+   * only a rebuild picks up proto changes.
    */
   def restartScalaCompilers(): Unit = {
     for {
@@ -1901,13 +1901,9 @@ class Compilers(
                 search,
                 completionItemPriority(),
                 serverConfig.compilers.sourcePathMode,
-                additionalClasspath = mbtWorkspaceSymbolProvider
-                  .protoGeneratedClassesDirectory()
-                  .map(_.toNIO)
-                  .toList,
                 // Gives the Scala compiler the same proto outlines the Java
                 // one gets on its SOURCE_PATH, so proto-generated classes
-                // resolve to a source position rather than bytecode alone.
+                // resolve, and resolve to a source position.
                 additionalSourcePath =
                   mbtWorkspaceSymbolProvider.protoJavaOutlineSourcePaths(),
               )

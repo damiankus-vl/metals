@@ -160,65 +160,6 @@ class MbtWorkspaceSymbolProvider(
         _.toplevelSymbols().asScala.exists(top => classSymbol.startsWith(top))
       )
 
-  /**
-   * Turbine's compiled bytecode (JVM binary name -> bytes) for proto-
-   * generated classes only, top-level and nested -- not every class turbine
-   * has header-compiled in the workspace. Exposes these classes on the Scala
-   * presentation compiler's classpath, since unlike the Java PC it has no
-   * notion of turbine's in-memory classes
-   * (see [[Compilers.withKeyAndDefault]]).
-   */
-  def protoGeneratedClassBytes(): Map[String, Array[Byte]] = {
-    if (!protobufWorkspace.isJavaPackageIndexingEnabled) Map.empty
-    else {
-      val topLevelBinaryNames =
-        documentsKeys.iterator
-          .filter(_.isProtoFilename)
-          .flatMap(protoJavaOutlines)
-          .flatMap(_.toplevelSymbols().asScala)
-          .map(_.stripSuffix("#").stripSuffix("."))
-          .toSet
-      if (topLevelBinaryNames.isEmpty) Map.empty
-      else
-        turbineCompiler.result.lowered
-          .bytes()
-          .asScala
-          .view
-          .filterKeys(isProtoGeneratedBinaryName(topLevelBinaryNames))
-          .toMap
-    }
-  }
-
-  private def isProtoGeneratedBinaryName(
-      topLevelBinaryNames: Set[String]
-  )(binaryName: String): Boolean =
-    topLevelBinaryNames.exists { top =>
-      binaryName == top ||
-      // Nested messages and their builder/OrBuilder types.
-      binaryName.startsWith(s"$top$$") ||
-      // The message class `implements <Name>OrBuilder`, a sibling top-level
-      // interface the outline declares next to it
-      // (JavaOutlineGenerator#generateTopLevelOrBuilder) that every accessor
-      // is inherited from, but only the class itself is recorded in
-      // `toplevelSymbols`.
-      binaryName == s"${top}OrBuilder"
-    }
-
-  /**
-   * Directory that proto-generated classes (see [[protoGeneratedClassBytes]])
-   * are materialized under, for adding to a Scala target's presentation-
-   * compiler classpath. `None` when the turbine classpath loader isn't in
-   * use, or no proto-generated classes are currently known.
-   */
-  def protoGeneratedClassesDirectory(): Option[AbsolutePath] = {
-    if (!javaSymbolLoader().isTurbineClasspath) None
-    else {
-      val classes = protoGeneratedClassBytes()
-      if (classes.isEmpty) None
-      else Some(ProtoGeneratedClassFiles.materialize(workspace, classes))
-    }
-  }
-
   private val turbineCompiler: TurbineCompiler[AbsolutePath] =
     new TurbineCompiler[AbsolutePath](
       () => documentsKeys,

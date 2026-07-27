@@ -5,11 +5,11 @@ import tests.BuildInfoVersions
 /**
  * Tests for Scala-to-proto code navigation.
  *
- * Unlike the Java presentation compiler, the Scala one has no built-in
- * notion of turbine's in-memory compiled classes: proto-generated classes
- * must be materialized as real `.class` files (see
- * [[scala.meta.internal.metals.mbt.ProtoGeneratedClassFiles]]) and added to
- * the Scala target's classpath before they resolve at all.
+ * The Java presentation compiler is handed the synthesized outlines through
+ * its own file manager. The Scala one has no such hook, so the outlines are
+ * materialized and put on its source path instead
+ * (MbtWorkspaceSymbolProvider#protoJavaOutlineSourcePaths); without that,
+ * proto-generated classes do not resolve at all.
  */
 class ProtoPCScalaSuite extends BaseProtoPCSuite("proto-pc-scala") {
 
