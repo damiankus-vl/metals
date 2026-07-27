@@ -1125,7 +1125,7 @@ abstract class MetalsLspService(
     mbt2.didSave(path)
     // Both presentation compilers cache what they resolved from the proto:
     // the Java one caches symbols from the synthesized outline, the Scala one
-    // reads a materialized classpath directory fixed at construction time.
+    // reads a source path fixed at construction time.
     if (path.isProtoFilename) {
       compilers.restartJavaCompilers()
       compilers.restartScalaCompilers()

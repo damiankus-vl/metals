@@ -144,9 +144,9 @@ class MbtWorkspaceSymbolProvider(
    * The synthesized Java outline declaring `classSymbol` (a SemanticDB
    * symbol, e.g. `com/example/jproto/WorkerProtocol#` or a nested
    * `com/example/jproto/WorkerProtocol#WorkResponse#`), if any. Lets
-   * navigation recover the supertypes of a proto-generated class that the
-   * presentation compiler can't see, so it can follow inherited members into
-   * compiled base classes.
+   * navigation place a symbol the compiler reported without any location of
+   * its own, which is all it can report for a class it never read a source
+   * file for.
    *
    * An outline records only its outer class in `toplevelSymbols`, so a
    * nested message is matched by prefix (safe since the outer symbol always
@@ -597,21 +597,6 @@ class MbtWorkspaceSymbolProvider(
   }
 
   /**
-   * Materialized proto Java outlines, keyed by the package they declare.
-   *
-   * This is the Scala counterpart to the Java compiler's SOURCE_PATH listing
-   * (see [[TurbineCompiler.listCombinedSourcepath]]): the Java compiler is
-   * handed the outlines as in-memory sources, but the Scala one only reads
-   * `listAllPackages`, and the index maps a proto package to the `.proto`
-   * file itself, which is not a source the Scala compiler can parse. Without
-   * this a proto-generated class resolves from bytecode alone and every
-   * definition request on it comes back with no source position.
-   *
-   * The package here is the one the outline declares, so it is unrelated to
-   * where the file was materialized -- callers key off the package symbol,
-   * not the directory layout.
-   */
-  /**
    * The materialized proto Java outlines, for a Scala target's
    * presentation-compiler source path. In the pruned source-path mode the
    * compiler keeps an indexed file only when it is on the source path too, so
@@ -621,6 +606,19 @@ class MbtWorkspaceSymbolProvider(
   def protoJavaOutlineSourcePaths(): Seq[Path] =
     protoJavaOutlineSourcesByPackage().values.flatten.toSeq
 
+  /**
+   * Materialized proto Java outlines, keyed by the package they declare.
+   *
+   * This is the Scala counterpart to the Java compiler's SOURCE_PATH listing
+   * (see [[TurbineCompiler.listCombinedSourcepath]]): the Java compiler is
+   * handed the outlines as in-memory sources, but the Scala one only reads
+   * `listAllPackages`, and the index maps a proto package to the `.proto`
+   * file itself, which is not a source the Scala compiler can parse.
+   *
+   * The package here is the one the outline declares, so it is unrelated to
+   * where the file was materialized -- callers key off the package symbol,
+   * not the directory layout.
+   */
   private def protoJavaOutlineSourcesByPackage(): Map[String, Set[Path]] = {
     if (!protobufWorkspace.isJavaPackageIndexingEnabled) Map.empty
     else {

@@ -2,7 +2,6 @@ package scala.meta.internal.metals
 
 import java.{util => ju}
 
-import scala.util.Try
 import scala.util.control.NonFatal
 
 import scala.meta.dialects
@@ -98,9 +97,8 @@ final class DefinitionProviderProtobufSupport(
   }
 
   /**
-   * Where a proto-generated symbol is declared, for a compiler that resolved
-   * it without any source location of its own -- the Scala one reads these
-   * classes from bytecode, so it can only report the symbol.
+   * Where a proto-generated symbol is declared, for a compiler that reported
+   * it without any location of its own.
    *
    * Empty when the symbol is not proto-generated, which is the common case:
    * callers use this only once their own lookup has come up empty.
@@ -136,11 +134,10 @@ final class DefinitionProviderProtobufSupport(
     }
 
     val generatedJavaFileUri =
-      Try(res.locations.get(0)).toOption
+      res.locations.asScala.headOption
         .map(_.getUri())
-        // No location means a classpath-only proto symbol (see
-        // [[hasProtoJavaLocation]]) -- look up the outline directly by
-        // symbol instead of via a virtual URI.
+        // No location at all (see [[hasProtoJavaLocation]]) -- look the
+        // outline up by symbol instead of via a virtual URI.
         .orElse(mbt.protoJavaOutlineFor(res.symbol).map(_.uri().toString()))
     val protoFilePath =
       generatedJavaFileUri.flatMap(ProtoJavaVirtualFile.extractProtoPath)

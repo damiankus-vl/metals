@@ -118,8 +118,8 @@ final class DefinitionProvider(
         compilers()
           .definition(params, token)
           .map { res =>
-            // Checked before `res.isEmpty`: the Scala PC resolves a
-            // proto-generated class from bytecode alone, so it reports the
+            // Checked before `res.isEmpty`: a proto-generated class can be
+            // resolved without any source file, and is then reported as a
             // symbol with no location at all.
             if (protobufDefinitions.hasProtoJavaLocation(res)) {
               protobufDefinitions.handleProtoJavaDefinition(res)

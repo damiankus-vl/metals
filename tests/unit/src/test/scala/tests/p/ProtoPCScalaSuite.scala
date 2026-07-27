@@ -42,8 +42,8 @@ class ProtoPCScalaSuite extends BaseProtoPCSuite("proto-pc-scala") {
       _ <- server.didOpen("a/src/main/proto/nested.proto")
       _ <- server.didOpen("a/src/main/scala/com/example/Handler.scala")
       _ <- server.didFocus("a/src/main/scala/com/example/Handler.scala")
-      // Without the materialized turbine classes on the classpath, the whole
-      // `Container`/`Container.Inner` chain used to resolve to `<X: error>`,
+      // Without the outlines on the source path the whole
+      // `Container`/`Container.Inner` chain resolves to `<X: error>`,
       // surfacing as "not found" diagnostics here.
       _ = assertNoDiagnostics()
       // Container import -> proto message definition
@@ -115,7 +115,7 @@ class ProtoPCScalaSuite extends BaseProtoPCSuite("proto-pc-scala") {
       _ <- server.didOpen("a/src/main/scala/com/example/Summary.scala")
       _ <- server.didFocus("a/src/main/scala/com/example/Summary.scala")
       // Accessors are inherited from the sibling `CompanyOrBuilder`
-      // interface, so they only resolve if it is on the classpath too.
+      // interface the same outline declares.
       _ = assertNoDiagnostics()
       // Accessor on the top-level message -> the proto field it reads.
       _ <- assertProtoDefinition(
@@ -139,9 +139,9 @@ class ProtoPCScalaSuite extends BaseProtoPCSuite("proto-pc-scala") {
     } yield ()
   }
 
-  // The Scala compiler reads proto-generated classes from a materialized
-  // classpath directory fixed when the compiler was built, so a proto edit
-  // has to both re-materialize the classes and rebuild the compiler.
+  // The Scala compiler reads proto-generated classes through a source path
+  // fixed when the compiler was built, so a proto edit has to both
+  // re-materialize the outlines and rebuild the compiler.
   test("scala-picks-up-proto-change") {
     cleanWorkspace()
     for {
@@ -183,8 +183,7 @@ class ProtoPCScalaSuite extends BaseProtoPCSuite("proto-pc-scala") {
       _ <- server.didSave("a/src/main/proto/model.proto")
       _ <- server.didFocus("a/src/main/scala/com/example/Handler.scala")
 
-      // The stale `User` class must no longer resolve off the materialized
-      // classpath directory.
+      // The stale `User` class must no longer resolve.
       _ = assertNoDiff(
         client.workspaceDiagnostics,
         """|a/src/main/scala/com/example/Handler.scala:2:31: error: object User is not a member of package com.example.api.jproto
