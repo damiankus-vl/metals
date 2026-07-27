@@ -643,6 +643,24 @@ class Compilers(
   }
 
   /**
+   * Evict all Scala presentation compilers so the next request rebuilds them.
+   *
+   * Unlike a Java compiler restart, this has to drop the cache entry rather
+   * than call `restart()`: a Scala compiler resolves proto-generated classes
+   * from a materialized classpath directory computed once when the compiler
+   * was constructed, so only a rebuild picks up proto changes.
+   */
+  def restartScalaCompilers(): Unit = {
+    for {
+      (key, _) <- cache
+      if key.isInstanceOf[PresentationCompilerKey.ScalaBuildTarget]
+    } {
+      scribe.debug(s"Restarting Scala compiler for $key")
+      Option(jcache.remove(key)).foreach(_.shutdown())
+    }
+  }
+
+  /**
    * Restart the PC for this target and all build targets that depend on it.
    *
    * This is necessary when the user makes code changes and downstream targets may
@@ -1883,6 +1901,15 @@ class Compilers(
                 search,
                 completionItemPriority(),
                 serverConfig.compilers.sourcePathMode,
+                additionalClasspath = mbtWorkspaceSymbolProvider
+                  .protoGeneratedClassesDirectory()
+                  .map(_.toNIO)
+                  .toList,
+                // Gives the Scala compiler the same proto outlines the Java
+                // one gets on its SOURCE_PATH, so proto-generated classes
+                // resolve to a source position rather than bytecode alone.
+                additionalSourcePath =
+                  mbtWorkspaceSymbolProvider.protoJavaOutlineSourcePaths(),
               )
             }
           val key =

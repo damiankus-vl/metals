@@ -112,23 +112,23 @@ final class DefinitionProvider(
       ) {
         compilers()
           .definition(params, token)
-          .map {
-            case res if res.isEmpty =>
+          .map { res =>
+            // Checked before `res.isEmpty`: the Scala PC resolves a
+            // proto-generated class from bytecode alone, so it reports the
+            // symbol with no location at all.
+            if (protobufDefinitions.hasProtoJavaLocation(res)) {
+              protobufDefinitions.handleProtoJavaDefinition(res)
+            } else if (res.isEmpty) {
               reportBuilder.setCompilerResult(res)
               Some(res)
-            case res =>
-              val hasProtoJavaLocation =
-                protobufDefinitions.hasProtoJavaLocation(res)
-              if (hasProtoJavaLocation) {
-                protobufDefinitions.handleProtoJavaDefinition(res)
-              } else {
-                val pathToDef = res.locations.asScala.head.getUri.toAbsolutePath
-                Some(
-                  res.copy(semanticdb =
-                    semanticdbs().textDocument(pathToDef).documentIncludingStale
-                  )
+            } else {
+              val pathToDef = res.locations.asScala.head.getUri.toAbsolutePath
+              Some(
+                res.copy(semanticdb =
+                  semanticdbs().textDocument(pathToDef).documentIncludingStale
                 )
-              }
+              )
+            }
           }
       } else {
         scribe.warn(

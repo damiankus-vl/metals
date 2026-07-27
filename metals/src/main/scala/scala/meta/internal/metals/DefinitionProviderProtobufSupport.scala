@@ -39,7 +39,14 @@ final class DefinitionProviderProtobufSupport(
       while (!found && it.hasNext) {
         found = ProtoJavaVirtualFile.isProtoJavaUri(it.next().getUri())
       }
-      found
+      // The Scala PC resolves proto-generated classes from bytecode alone
+      // (see [[scala.meta.internal.metals.mbt.ProtoGeneratedClassFiles]]),
+      // with no source location -- unlike the Java PC, which resolves them
+      // via a virtual SOURCE_PATH entry already pointing at the outline. So
+      // also treat a locationless result as a proto-Java hit if it matches a
+      // known outline.
+      found ||
+      (res.locations.isEmpty && mbt.protoJavaOutlineFor(res.symbol).isDefined)
     }
 
   def enhanceWithProtobufDefinition(
@@ -117,7 +124,12 @@ final class DefinitionProviderProtobufSupport(
     }
 
     val generatedJavaFileUri =
-      Try(res.locations.get(0)).toOption.map(_.getUri())
+      Try(res.locations.get(0)).toOption
+        .map(_.getUri())
+        // No location means a classpath-only proto symbol (see
+        // [[hasProtoJavaLocation]]) -- look up the outline directly by
+        // symbol instead of via a virtual URI.
+        .orElse(mbt.protoJavaOutlineFor(res.symbol).map(_.uri().toString()))
     val protoFilePath =
       generatedJavaFileUri.flatMap(ProtoJavaVirtualFile.extractProtoPath)
 

@@ -140,6 +140,85 @@ class MbtWorkspaceSymbolProvider(
   def protoJavaOutlines(file: AbsolutePath): Seq[VirtualTextDocument] =
     documents.get(file).toSeq.flatMap(protobufWorkspace.allJavaOutlines)
 
+  /**
+   * The synthesized Java outline declaring `classSymbol` (a SemanticDB
+   * symbol, e.g. `com/example/jproto/WorkerProtocol#` or a nested
+   * `com/example/jproto/WorkerProtocol#WorkResponse#`), if any. Lets
+   * navigation recover the supertypes of a proto-generated class that the
+   * presentation compiler can't see, so it can follow inherited members into
+   * compiled base classes.
+   *
+   * An outline records only its outer class in `toplevelSymbols`, so a
+   * nested message is matched by prefix (safe since the outer symbol always
+   * ends in `#`).
+   */
+  def protoJavaOutlineFor(classSymbol: String): Option[VirtualTextDocument] =
+    documents.keysIterator
+      .filter(_.isProtoFilename)
+      .flatMap(protoJavaOutlines)
+      .find(
+        _.toplevelSymbols().asScala.exists(top => classSymbol.startsWith(top))
+      )
+
+  /**
+   * Turbine's compiled bytecode (JVM binary name -> bytes) for proto-
+   * generated classes only, top-level and nested -- not every class turbine
+   * has header-compiled in the workspace. Exposes these classes on the Scala
+   * presentation compiler's classpath, since unlike the Java PC it has no
+   * notion of turbine's in-memory classes
+   * (see [[Compilers.withKeyAndDefault]]).
+   */
+  def protoGeneratedClassBytes(): Map[String, Array[Byte]] = {
+    if (!protobufWorkspace.isJavaPackageIndexingEnabled) Map.empty
+    else {
+      val topLevelBinaryNames =
+        documentsKeys.iterator
+          .filter(_.isProtoFilename)
+          .flatMap(protoJavaOutlines)
+          .flatMap(_.toplevelSymbols().asScala)
+          .map(_.stripSuffix("#").stripSuffix("."))
+          .toSet
+      if (topLevelBinaryNames.isEmpty) Map.empty
+      else
+        turbineCompiler.result.lowered
+          .bytes()
+          .asScala
+          .view
+          .filterKeys(isProtoGeneratedBinaryName(topLevelBinaryNames))
+          .toMap
+    }
+  }
+
+  private def isProtoGeneratedBinaryName(
+      topLevelBinaryNames: Set[String]
+  )(binaryName: String): Boolean =
+    topLevelBinaryNames.exists { top =>
+      binaryName == top ||
+      // Nested messages and their builder/OrBuilder types.
+      binaryName.startsWith(s"$top$$") ||
+      // The message class `implements <Name>OrBuilder`, a sibling top-level
+      // interface the outline declares next to it
+      // (JavaOutlineGenerator#generateTopLevelOrBuilder) that every accessor
+      // is inherited from, but only the class itself is recorded in
+      // `toplevelSymbols`.
+      binaryName == s"${top}OrBuilder"
+    }
+
+  /**
+   * Directory that proto-generated classes (see [[protoGeneratedClassBytes]])
+   * are materialized under, for adding to a Scala target's presentation-
+   * compiler classpath. `None` when the turbine classpath loader isn't in
+   * use, or no proto-generated classes are currently known.
+   */
+  def protoGeneratedClassesDirectory(): Option[AbsolutePath] = {
+    if (!javaSymbolLoader().isTurbineClasspath) None
+    else {
+      val classes = protoGeneratedClassBytes()
+      if (classes.isEmpty) None
+      else Some(ProtoGeneratedClassFiles.materialize(workspace, classes))
+    }
+  }
+
   private val turbineCompiler: TurbineCompiler[AbsolutePath] =
     new TurbineCompiler[AbsolutePath](
       () => documentsKeys,
@@ -564,10 +643,60 @@ class MbtWorkspaceSymbolProvider(
   }
 
   override def listAllPackages(): ju.Map[String, ju.Set[Path]] = {
-    documentsByPackage
-      .mapValues(set => ju.Collections.unmodifiableSet(set))
-      .toMap
-      .asJava
+    val indexed = documentsByPackage.map { case (pkg, paths) =>
+      pkg -> paths.asScala.toSet
+    }.toMap
+    val merged = protoJavaOutlineSourcesByPackage().foldLeft(indexed) {
+      case (acc, (pkg, outlines)) =>
+        acc.updated(pkg, acc.getOrElse(pkg, Set.empty) ++ outlines)
+    }
+    merged.map { case (pkg, paths) =>
+      pkg -> ju.Collections.unmodifiableSet(paths.asJava)
+    }.asJava
+  }
+
+  /**
+   * Materialized proto Java outlines, keyed by the package they declare.
+   *
+   * This is the Scala counterpart to the Java compiler's SOURCE_PATH listing
+   * (see [[TurbineCompiler.listCombinedSourcepath]]): the Java compiler is
+   * handed the outlines as in-memory sources, but the Scala one only reads
+   * `listAllPackages`, and the index maps a proto package to the `.proto`
+   * file itself, which is not a source the Scala compiler can parse. Without
+   * this a proto-generated class resolves from bytecode alone and every
+   * definition request on it comes back with no source position.
+   *
+   * The package here is the one the outline declares, so it is unrelated to
+   * where the file was materialized -- callers key off the package symbol,
+   * not the directory layout.
+   */
+  /**
+   * The materialized proto Java outlines, for a Scala target's
+   * presentation-compiler source path. In the pruned source-path mode the
+   * compiler keeps an indexed file only when it is on the source path too, so
+   * these have to be declared in both places: here for eligibility, and in
+   * [[listAllPackages]] for the package they actually belong to.
+   */
+  def protoJavaOutlineSourcePaths(): Seq[Path] =
+    protoJavaOutlineSourcesByPackage().values.flatten.toSeq
+
+  private def protoJavaOutlineSourcesByPackage(): Map[String, Set[Path]] = {
+    if (!protobufWorkspace.isJavaPackageIndexingEnabled) Map.empty
+    else {
+      val outlines = for {
+        protoPath <- documentsKeys.iterator.filter(_.isProtoFilename).toSeq
+        outline <- protoJavaOutlines(protoPath)
+        className <- ProtoJavaVirtualFile
+          .extractClassName(outline.uri().toString())
+          .toSeq
+        javaFile <- ProtoGeneratedJavaFiles
+          .materialize(workspace, protoPath, className, outline.text)
+          .toSeq
+      } yield outline.pkg -> javaFile.toNIO
+      outlines.groupMap(_._1)(_._2).map { case (pkg, paths) =>
+        pkg -> paths.toSet
+      }
+    }
   }
 
   def document(file: AbsolutePath): Option[IndexedDocument] = {
