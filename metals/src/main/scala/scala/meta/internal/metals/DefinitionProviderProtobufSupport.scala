@@ -39,12 +39,10 @@ final class DefinitionProviderProtobufSupport(
       while (!found && it.hasNext) {
         found = ProtoJavaVirtualFile.isProtoJavaUri(it.next().getUri())
       }
-      // The Scala PC resolves proto-generated classes from bytecode alone
-      // (see [[scala.meta.internal.metals.mbt.ProtoGeneratedClassFiles]]),
-      // with no source location -- unlike the Java PC, which resolves them
-      // via a virtual SOURCE_PATH entry already pointing at the outline. So
-      // also treat a locationless result as a proto-Java hit if it matches a
-      // known outline.
+      // A proto-generated class can also be resolved without any location at
+      // all, unlike the Java PC's virtual SOURCE_PATH entry which already
+      // points at the outline. So also treat a locationless result as a
+      // proto-Java hit if it matches a known outline.
       found ||
       (res.locations.isEmpty && mbt.protoJavaOutlineFor(res.symbol).isDefined)
     }
@@ -98,6 +96,20 @@ final class DefinitionProviderProtobufSupport(
       )
       result
   }
+
+  /**
+   * Where a proto-generated symbol is declared, for a compiler that resolved
+   * it without any source location of its own -- the Scala one reads these
+   * classes from bytecode, so it can only report the symbol.
+   *
+   * Empty when the symbol is not proto-generated, which is the common case:
+   * callers use this only once their own lookup has come up empty.
+   */
+  def protoDefinitionLocations(symbol: String): List[Location] =
+    if (!protobufLspConfig().definition) Nil
+    else
+      handleProtoJavaDefinition(DefinitionResult.empty(symbol)).toList
+        .flatMap(_.locations.asScala)
 
   def handleProtoJavaDefinition(
       res: DefinitionResult
