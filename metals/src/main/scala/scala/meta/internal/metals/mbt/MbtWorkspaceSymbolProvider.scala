@@ -160,6 +160,29 @@ class MbtWorkspaceSymbolProvider(
         _.toplevelSymbols().asScala.exists(top => classSymbol.startsWith(top))
       )
 
+  /**
+   * The synthesized outlines whose declared package encloses `packageName`,
+   * paired with the proto they were generated from: an outline declaring
+   * `com/example/api/jproto/` answers a query for
+   * `com/example/api/jproto/model/`.
+   *
+   * Every generator roots its output at the package the proto configures but
+   * disagrees on what sits below it -- an outer class, a per-file sub-package,
+   * or nothing. Matching only the root leaves that to the caller, so this
+   * covers generated code Metals did not synthesize itself.
+   *
+   * Lazy on purpose: callers stop at the first proto that fits, and the scan
+   * over every indexed proto is the expensive part.
+   */
+  def protoJavaOutlinesUnderPackage(
+      packageName: String
+  ): Iterator[(AbsolutePath, VirtualTextDocument)] =
+    for {
+      protoPath <- documents.keysIterator.filter(_.isProtoFilename)
+      outline <- protoJavaOutlines(protoPath).iterator
+      if outline.pkg.nonEmpty && packageName.startsWith(outline.pkg)
+    } yield (protoPath, outline)
+
   private val turbineCompiler: TurbineCompiler[AbsolutePath] =
     new TurbineCompiler[AbsolutePath](
       () => documentsKeys,
@@ -181,6 +204,9 @@ class MbtWorkspaceSymbolProvider(
           for {
             doc <- documents.get(file).toList
             outline <- protobufWorkspace.allJavaOutlines(doc)
+            // The real source is header-compiled too, and of two units
+            // declaring the same class turbine keeps whichever it lowered last.
+            if !declaredByJavaSource(outline)
           } yield new SourceFile(outline.getName(), outline.text)
         } else {
           Nil
@@ -191,11 +217,13 @@ class MbtWorkspaceSymbolProvider(
       // load recently changed files from the sourcepath.
       () => turbineRecompileDelay(),
       listProtoJavaOutlinesForPackage = pkg =>
-        protobufWorkspace.listProtoJavaOutlinesForPackage(
-          pkg,
-          documentsByPackage,
-          documents,
-        ),
+        protobufWorkspace
+          .listProtoJavaOutlinesForPackage(
+            pkg,
+            documentsByPackage,
+            documents,
+          )
+          .filterNot(declaredByJavaSource),
       sleeper = sleeper,
       onIndexingDone = onIndexingDone,
       onNewProjectClasspath = classpath =>
@@ -564,7 +592,9 @@ class MbtWorkspaceSymbolProvider(
                       .map(doc.toSemanticdbCompilationUnit)
                       .iterator
                   } else if (doc.language.isProtobuf) {
-                    protobufWorkspace.generateProtoJavaOutlines(doc, pkg)
+                    protobufWorkspace
+                      .generateProtoJavaOutlines(doc, pkg)
+                      .filterNot(declaredByJavaSource)
                   } else {
                     Iterator.empty
                   }
@@ -625,6 +655,11 @@ class MbtWorkspaceSymbolProvider(
       val outlines = for {
         protoPath <- documentsKeys.iterator.filter(_.isProtoFilename).toSeq
         outline <- protoJavaOutlines(protoPath)
+        // The Scala compiler reads Java sources too, so either language counts.
+        if !declaredByRealSource(
+          outline,
+          document => !document.language.isProtobuf,
+        )
         className <- ProtoJavaVirtualFile
           .extractClassName(outline.uri().toString())
           .toSeq
@@ -637,6 +672,42 @@ class MbtWorkspaceSymbolProvider(
       }
     }
   }
+
+  /**
+   * Whether a source that `accepts` already declares what `outline` declares --
+   * both offering `com/example/api/jproto/User#`, say.
+   *
+   * The outline stands in for generated code that is not on disk, so once the
+   * code is there it has to win. Nothing tells the compiler which of two units
+   * under one name is the stub: javac takes the newer, which a freshly
+   * materialized outline always is. Everything would then type-check against
+   * what the `.proto` implies, and whatever the generator added on top would
+   * look absent.
+   *
+   * `accepts` is which sources count, and differs per compiler: javac cannot
+   * read a Scala class of the same name, so dropping the outline for one would
+   * leave the name unresolved rather than better resolved.
+   */
+  private def declaredByRealSource(
+      outline: VirtualTextDocument,
+      accepts: IndexedDocument => Boolean,
+  ): Boolean = {
+    val outlineSymbols = outline.toplevelSymbols().asScala
+    documentsByPackage.get(outline.pkg).exists { paths =>
+      paths.asScala.exists { path =>
+        documents.get(AbsolutePath(path)).exists { document =>
+          accepts(document) &&
+          document.symbols.exists(symbolInfo =>
+            outlineSymbols.contains(symbolInfo.getSymbol())
+          )
+        }
+      }
+    }
+  }
+
+  /** [[declaredByRealSource]] for a compiler that can only read Java. */
+  private def declaredByJavaSource(outline: VirtualTextDocument): Boolean =
+    declaredByRealSource(outline, _.language.isJava)
 
   def document(file: AbsolutePath): Option[IndexedDocument] = {
     documents.get(file)

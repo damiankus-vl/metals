@@ -191,7 +191,11 @@ final class DefinitionProvider(
       reportBuilder
         .build(scalaVersionSelector)
         .foreach(r => rc.unsanitized().create(() => r))
-      protobufDefinitions.enhanceWithProtobufDefinition(result)
+      // Runs after every strategy, so whatever real source was found keeps the
+      // first slot and the proto is only ever an extra entry.
+      protobufDefinitions.withProtoOrigin(
+        protobufDefinitions.enhanceWithProtobufDefinition(result)
+      )
     }
   }
 

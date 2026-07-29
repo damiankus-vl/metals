@@ -13,6 +13,7 @@ import scala.meta.internal.metals.mbt.MbtWorkspaceSymbolProvider
 import scala.meta.internal.metals.mbt.ProtoGeneratedJavaFiles
 import scala.meta.internal.metals.mbt.ProtoJavaSymbolMapper
 import scala.meta.internal.metals.mbt.ProtoJavaVirtualFile
+import scala.meta.internal.metals.mbt.VirtualTextDocument
 import scala.meta.internal.mtags.Mtags
 import scala.meta.internal.mtags.Symbol
 import scala.meta.internal.semanticdb.SymbolOccurrence
@@ -82,9 +83,13 @@ final class DefinitionProviderProtobufSupport(
     )).headOption
 
     protoLocation.fold(result) { loc =>
+      // Appended, not prepended: the generated source is what the code
+      // compiles against, so it keeps the first slot. [[withProtoOrigin]] has
+      // to agree, since all that decides which route fires is whether the
+      // generated file carries a `// source:` header.
       val allLocations = new ju.ArrayList[Location](result.locations.size() + 1)
-      allLocations.add(loc)
       allLocations.addAll(result.locations)
+      allLocations.add(loc)
       result.copy(locations = allLocations)
     }
   } catch {
@@ -104,25 +109,153 @@ final class DefinitionProviderProtobufSupport(
    * callers use this only once their own lookup has come up empty.
    */
   def protoDefinitionLocations(symbol: String): List[Location] =
-    if (!protobufLspConfig().definition) Nil
+    protoOrigin(symbol).toList.flatMap(_.locations.asScala)
+
+  private def protoOrigin(symbol: String): Option[DefinitionResult] =
+    if (!protobufLspConfig().definition) None
+    else protoOriginResult(DefinitionResult.empty(symbol)).filterNot(_.isEmpty)
+
+  /**
+   * Adds the proto a generated symbol came from, and the outline synthesized
+   * from it, to a result that has no proto location yet.
+   *
+   * Locations already found stay first -- they are what the code compiles
+   * against, and the proto only explains where they came from. With none (the
+   * generator never ran, or its output was cleaned away) the proto is all
+   * there is to offer.
+   *
+   * The outline is dropped once a real source is in the list, being a stub
+   * duplicate of it.
+   */
+  def withProtoOrigin(result: DefinitionResult): DefinitionResult = {
+    val symbol =
+      if (result.symbol.nonEmpty) result.symbol else result.querySymbol
+    val alreadyPointsAtProto =
+      result.locations.asScala.exists(_.getUri().isProtoFilename)
+    if (
+      !protobufLspConfig().definition || symbol.isEmpty ||
+      symbol.endsWith("/") || alreadyPointsAtProto
+    ) result
+    else if (result.isEmpty) protoOrigin(symbol).getOrElse(result)
+    else {
+      // Deduplicated by file, not by range: the same file offered twice with
+      // near-identical ranges is noise in the dropdown.
+      val knownUris = result.locations.asScala.map(_.getUri()).toSet
+      // Against a real source the outline is a subset: what the `.proto`
+      // implies and nothing the generator added on top. So the test is where
+      // the result points, not whether the outline's name lines up with the
+      // symbol -- a generator that nests its output in a per-file sub-package
+      // (`api/jproto/model/User#` against the outline's `api/jproto/Model#User#`)
+      // never lines up, and its output is no less real.
+      val outlineDuplicatesRealSource =
+        result.locations.asScala.exists(location =>
+          !isSynthesizedOutline(location)
+        )
+      val extra = protoDefinitionLocations(symbol).filterNot(location =>
+        knownUris.contains(location.getUri()) ||
+          (outlineDuplicatesRealSource && isSynthesizedOutline(location))
+      )
+      if (extra.isEmpty) result
+      else {
+        val allLocations = new ju.ArrayList[Location](result.locations)
+        extra.foreach(allLocations.add)
+        result.copy(locations = allLocations)
+      }
+    }
+  }
+
+  /**
+   * Whether `location` points at an outline Metals synthesized from a `.proto`
+   * -- either the virtual entry the Java compiler resolves against,
+   * `file:///a/model.proto.metals-proto-java/User.java`, or the file
+   * materialized for the client to open,
+   * `.metals/readonly/dependencies/proto-generated/a/model.proto/User.java`.
+   */
+  private def isSynthesizedOutline(location: Location): Boolean =
+    ProtoJavaVirtualFile.isProtoJavaUri(location.getUri()) ||
+      location
+        .getUri()
+        .toAbsolutePathSafe
+        .flatMap(ProtoGeneratedJavaFiles.protoPathFor(workspace, _))
+        .isDefined
+
+  /**
+   * The proto file and synthesized outline that `symbol` was generated from,
+   * for code a generator wrote to disk and that therefore carries no virtual
+   * proto URI of its own.
+   *
+   * Only what every generator agrees on is matched: the type sits under the
+   * package the proto configures and keeps the name the proto declares. The
+   * nesting in between is what they disagree on, so it is not checked --
+   * `com/example/api/jproto/model/User#` and `com/example/api/jproto/Model#User#`
+   * both resolve to `message User` in `model.proto`.
+   */
+  private def generatedFromProto(
+      symbol: String
+  ): Option[VirtualTextDocument] = {
+    val querySymbol = Symbol(symbol)
+    val ownerChain = symbolSuffixAfterPackage(querySymbol)
+    if (ownerChain.isEmpty) None
     else
-      handleProtoJavaDefinition(DefinitionResult.empty(symbol)).toList
-        .flatMap(_.locations.asScala)
+      for {
+        (protoPath, anyOutline) <- mbt
+          .protoJavaOutlinesUnderPackage(querySymbol.enclosingPackage.value)
+          .find { case (protoPath, _) => declaresOwner(protoPath, ownerChain) }
+      } yield {
+        // `java_multiple_files` yields one outline per class, so taking any of
+        // them would as often land on a sibling. A single-file proto nests
+        // everything in an outer class that no chain matches, and there the
+        // one outline is the answer.
+        mbt
+          .protoJavaOutlines(protoPath)
+          .find(outline =>
+            outline
+              .toplevelSymbols()
+              .asScala
+              .exists(toplevelSymbol =>
+                symbolSuffixMatches(
+                  ownerChain,
+                  symbolSuffixAfterPackage(Symbol(toplevelSymbol)),
+                )
+              )
+          )
+          .getOrElse(anyOutline)
+      }
+  }
+
+  /**
+   * Whether the proto declares a type matching `ownerChain` or one of its
+   * enclosing prefixes -- a field or a method is placed by its owner, so
+   * `List("user", "getname")` is satisfied by a proto declaring `message User`.
+   */
+  private def declaresOwner(
+      protoPath: AbsolutePath,
+      ownerChain: List[String],
+  ): Boolean = {
+    val protoTypes = for {
+      document <- mbt.document(protoPath).toList
+      symbolInfo <- document.symbols
+      protoSymbol = Symbol(symbolInfo.getSymbol())
+      if protoSymbol.isType
+    } yield symbolSuffixAfterPackage(protoSymbol)
+    ownerChain.inits.exists(chain =>
+      chain.nonEmpty && protoTypes.exists(symbolSuffixMatches(chain, _))
+    )
+  }
 
   def handleProtoJavaDefinition(
       res: DefinitionResult
   ): Option[DefinitionResult] = {
-    // When the proto file declares no java_package option, the proto package
-    // matches the generated Java package, so the MBT index resolves the Java
-    // symbol straight to the proto document. Those proto-file hits are ignored
-    // here so the generated Java outline lookup still runs; the proto file
-    // stays reachable through the fallback below.
+    // Without a `java_package` option the generated Java package equals the
+    // proto package, so the MBT index answers the Java symbol with the proto
+    // document itself. Dropping those hits keeps the outline lookup running;
+    // the proto stays reachable through the fallback below.
     val mbtJavaResult =
       mbt.definition(res.symbol).filterNot(_.getUri.isProtoFilename)
     if (mbtJavaResult.nonEmpty) {
       val locations = new ju.ArrayList[Location](mbtJavaResult.size)
       mbtJavaResult.foreach(locations.add)
-      return Some(
+      Some(
         DefinitionResult(
           locations,
           res.symbol,
@@ -131,14 +264,29 @@ final class DefinitionProviderProtobufSupport(
           res.querySymbol,
         )
       )
-    }
+    } else protoOriginResult(res)
+  }
 
+  /**
+   * The proto `res.symbol` was generated from, and the outline synthesized
+   * from it.
+   *
+   * Never answers with the generated code itself, unlike
+   * [[handleProtoJavaDefinition]], so a caller that already has that code can
+   * append these instead of being handed back its own result.
+   */
+  private def protoOriginResult(
+      res: DefinitionResult
+  ): Option[DefinitionResult] = {
     val generatedJavaFileUri =
       res.locations.asScala.headOption
         .map(_.getUri())
         // No location at all (see [[hasProtoJavaLocation]]) -- look the
         // outline up by symbol instead of via a virtual URI.
         .orElse(mbt.protoJavaOutlineFor(res.symbol).map(_.uri().toString()))
+        // Code a generator wrote to disk has no virtual URI, so the proto has
+        // to come from the symbol's shape instead.
+        .orElse(generatedFromProto(res.symbol).map(_.uri().toString()))
     val protoFilePath =
       generatedJavaFileUri.flatMap(ProtoJavaVirtualFile.extractProtoPath)
 
@@ -170,11 +318,10 @@ final class DefinitionProviderProtobufSupport(
         DefinitionResult(
           allLocations.asJava,
           res.symbol,
-          // Recording the materialized file as the definition destination lets
-          // Metals remember which build target the user jumped from
-          // (InteractiveSemanticdbs.didDefinition), so later requests inside
-          // the materialized file use that target's classpath, which includes
-          // the protobuf runtime.
+          // Recording the materialized file as the destination lets Metals
+          // remember the build target jumped from
+          // (InteractiveSemanticdbs.didDefinition), so later requests inside it
+          // use that target's classpath, which carries the protobuf runtime.
           definition = generatedJavaLocation.map(_.getUri().toAbsolutePath),
           semanticdb = None,
           res.querySymbol,
@@ -247,14 +394,15 @@ final class DefinitionProviderProtobufSupport(
     }
 
     val querySym = Symbol(javaSymbol)
-    // For type symbols, require the type itself to be present: a message or
-    // enum missing from the generated source means the synthesized outline
-    // is stale or belongs to a different proto, and the proto fallback is
-    // more precise than an approximate enclosing-class location. Members may
-    // still fall back to their enclosing classes, since inherited members
-    // aren't always present in the synthesized outline.
-    if (querySym.isType) findRange(querySym.value, definitions)
-    else loop(querySym)
+    // Exact first, and for a type *only* the type itself: a message missing
+    // from the outline means the outline is stale or belongs to another proto,
+    // and an approximate enclosing-class range is worse than what the
+    // owner-chain pass finds. Members may fall back to their enclosing class,
+    // since inherited ones are often absent from the outline.
+    val exact =
+      if (querySym.isType) findRange(querySym.value, definitions)
+      else loop(querySym)
+    exact.orElse(findRangeByOwnerChain(querySym, definitions))
   }
 
   private def findRange(
@@ -262,6 +410,30 @@ final class DefinitionProviderProtobufSupport(
       definitions: Iterable[SymbolOccurrence],
   ): Option[s.Range] =
     definitions.find(_.symbol == symbol).flatMap(_.range)
+
+  /**
+   * The declaration whose owner chain matches `querySymbol`'s, for a symbol
+   * that names the same type as the outline but nests it differently: the query
+   * `com/example/api/jproto/model/User#` is `List("user")` after its package
+   * and finds the outline's `com/example/api/jproto/Model#User#`, which is
+   * `List("model", "user")` -- one chain ends with the other.
+   */
+  private def findRangeByOwnerChain(
+      querySymbol: Symbol,
+      definitions: Iterable[SymbolOccurrence],
+  ): Option[s.Range] = {
+    val ownerChain = symbolSuffixAfterPackage(querySymbol)
+    if (ownerChain.isEmpty) None
+    else
+      definitions
+        .find(occurrence =>
+          symbolSuffixMatches(
+            ownerChain,
+            symbolSuffixAfterPackage(Symbol(occurrence.symbol)),
+          )
+        )
+        .flatMap(_.range)
+  }
 
   /**
    * The lowercased chain of owner names between `sym` and its enclosing
@@ -278,6 +450,10 @@ final class DefinitionProviderProtobufSupport(
     loop(sym, Nil)
   }
 
+  /**
+   * Whether either chain is a suffix of the other, so `List("model", "user")`
+   * matches `List("user")` but not `List("user", "getname")`.
+   */
   private def symbolSuffixMatches(
       lhs: List[String],
       rhs: List[String],
@@ -384,36 +560,64 @@ final class DefinitionProviderProtobufSupport(
 
     try {
       val methodNameOpt = extractMethodName(javaSymbol)
-      val classNameOpt = extractClassName(javaSymbol)
+      val ownerChain = symbolSuffixAfterPackage(Symbol(javaSymbol).owner)
 
-      methodNameOpt.flatMap { methodName =>
-        val protoFieldNameOpt = javaMethodToProtoField(methodName)
-        protoFieldNameOpt.flatMap { protoFieldName =>
-          val input = protoPath.toInputFromBuffers(buffers)
-          val protoJavaMtags = new ProtoMtagsV2(input, includeMembers = true)
-          val doc = protoJavaMtags.index()
-          val fieldSuffix = s"$protoFieldName()."
+      methodNameOpt.flatMap(javaMethodToProtoField).flatMap { protoFieldName =>
+        val input = protoPath.toInputFromBuffers(buffers)
+        val protoJavaMtags = new ProtoMtagsV2(input, includeMembers = true)
+        val doc = protoJavaMtags.index()
+        val fieldSuffix = s"$protoFieldName()."
 
-          doc.occurrences
-            .find { occ =>
-              val matchesFieldName = occ.symbol.endsWith(fieldSuffix)
-              val isDefinition = occ.role == s.SymbolOccurrence.Role.DEFINITION
-              val matchesClass = classNameOpt.forall { className =>
-                occ.symbol.contains(s"/$className#") || occ.symbol.startsWith(
-                  s"$className#"
-                )
-              }
-              matchesFieldName && isDefinition && matchesClass
+        // A field is placed by the message owning it, so the chains have to
+        // line up -- except each side nests what the other does not: the
+        // generated side adds `Builder` (`List("user", "builder")`) or an outer
+        // class, the proto side the enclosing `oneof` (`List("user", "contact")`).
+        // So the strict pass runs over the whole file first, then the relaxed
+        // one that lets the proto sit deeper.
+        def strictly(javaChain: List[String], protoChain: List[String]) =
+          symbolSuffixMatches(javaChain, protoChain)
+
+        def protoNestsDeeper(
+            javaChain: List[String],
+            protoChain: List[String],
+        ) =
+          javaChain.tails
+            .exists(suffix => suffix.nonEmpty && protoChain.startsWith(suffix))
+
+        def fieldDeclaredIn(
+            javaChain: List[String],
+            matches: (List[String], List[String]) => Boolean,
+        ) =
+          doc.occurrences.find { occ =>
+            occ.symbol.endsWith(fieldSuffix) &&
+            occ.role == s.SymbolOccurrence.Role.DEFINITION &&
+            (javaChain.isEmpty || matches(
+              javaChain,
+              symbolSuffixAfterPackage(Symbol(occ.symbol).owner),
+            ))
+          }
+
+        // Longest chain first: a field on a nested message beats a same-named
+        // field on its parent. The shorter prefixes then absorb the levels the
+        // generated side added.
+        val chains =
+          if (ownerChain.isEmpty) Iterator(List.empty[String])
+          else ownerChain.inits.filter(_.nonEmpty)
+
+        chains
+          .flatMap(chain =>
+            fieldDeclaredIn(chain, strictly)
+              .orElse(fieldDeclaredIn(chain, protoNestsDeeper))
+          )
+          .nextOption()
+          .flatMap { occ =>
+            occ.range.map { range =>
+              new Location(
+                protoPath.toURI.toString(),
+                range.toLsp,
+              )
             }
-            .flatMap { occ =>
-              occ.range.map { range =>
-                new Location(
-                  protoPath.toURI.toString(),
-                  range.toLsp,
-                )
-              }
-            }
-        }
+          }
       }
     } catch {
       case NonFatal(e) =>
@@ -482,20 +686,6 @@ final class DefinitionProviderProtobufSupport(
   }
 
   /**
-   * The top-level class name owning `symbol`, for example the SemanticDB
-   * symbol `com/example/Foo#Bar#baz().` becomes `Foo`.
-   */
-  private def extractClassName(symbol: String): Option[String] = {
-    val sym = Symbol(symbol)
-    def findTopLevelClass(s: Symbol): Option[String] = {
-      if (s.isNone || s.isRootPackage || s.isEmptyPackage) None
-      else if (s.owner.isPackage) Some(s.displayName)
-      else findTopLevelClass(s.owner)
-    }
-    findTopLevelClass(sym)
-  }
-
-  /**
    * The method name of `symbol`, for example the SemanticDB symbol
    * `com/example/Foo#bar(+1).` becomes `bar`.
    */
@@ -520,6 +710,7 @@ final class DefinitionProviderProtobufSupport(
    *   - `hasFooBar` / `clearFooBar` -> `foo_bar`
    *   - `getHTTPCode` -> `HTTP_CODE` (already-uppercase names, e.g. proto
    *     enum-like fields, are kept as-is instead of snake-cased)
+   *   - `fooBar` -> `foo_bar` (a generator that exposes the field directly)
    *
    * Inverse of [[scala.meta.internal.metals.mbt.ProtoJavaSymbolMapper#protoFieldToJavaMethods]].
    */
@@ -556,7 +747,9 @@ final class DefinitionProviderProtobufSupport(
       else if (methodName.forall(c => c.isUpper || c == '_' || c.isDigit))
         Some(methodName)
       else
-        None
+        // Not every generator prefixes its accessors -- some expose the field
+        // under its own name, so `fooBar` is the field itself.
+        Some(methodName)
 
     fieldName.map { name =>
       if (name.forall(c => c.isUpper || c == '_' || c.isDigit)) name

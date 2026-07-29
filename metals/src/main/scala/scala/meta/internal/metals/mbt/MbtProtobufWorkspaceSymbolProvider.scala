@@ -2,7 +2,6 @@ package scala.meta.internal.metals.mbt
 
 import java.nio.file.Path
 import java.util.concurrent.ConcurrentSkipListSet
-import javax.tools.JavaFileObject
 
 import scala.collection.concurrent.TrieMap
 import scala.util.control.NonFatal
@@ -34,7 +33,7 @@ final class MbtProtobufWorkspaceSymbolProvider(
       pkg: String,
       documentsByPackage: TrieMap[String, ConcurrentSkipListSet[Path]],
       documents: TrieMap[AbsolutePath, IndexedDocument],
-  ): Iterator[JavaFileObject] = {
+  ): Iterator[VirtualTextDocument] = {
     scribe.debug(s"mbt-v2-turbine: looking up proto outlines for package: $pkg")
     documentsByPackage.get(pkg) match {
       case None =>

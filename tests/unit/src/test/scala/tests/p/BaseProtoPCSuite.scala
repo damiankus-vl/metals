@@ -40,4 +40,25 @@ abstract class BaseProtoPCSuite(name: String) extends BaseLspSuite(name) {
       expected,
       includeLocation = _.getUri().endsWith(".proto"),
     )
+
+  /**
+   * Asserts the workspace-relative files the definition resolves to, in the
+   * order the client receives them -- the first is where the editor jumps, the
+   * rest fill the dropdown.
+   *
+   * [[tests.TestingServer.assertDefinition]] sorts its messages, so it cannot
+   * express ordering.
+   */
+  def assertDefinitionFileOrder(
+      filename: String,
+      query: String,
+      expected: List[String],
+  )(implicit location: munit.Location): Future[Unit] =
+    for {
+      locations <- server.definitionSubstringQuery(filename, query)
+    } yield {
+      val workspaceUri = workspace.toURI.toString()
+      val files = locations.map(_.getUri().stripPrefix(workspaceUri))
+      assertNoDiff(files.mkString("\n"), expected.mkString("\n"))
+    }
 }
