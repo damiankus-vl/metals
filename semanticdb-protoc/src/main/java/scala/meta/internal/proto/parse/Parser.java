@@ -699,6 +699,10 @@ public final class Parser {
     int startPos = currentPos();
     expectIdentifier("extensions");
     ImmutableList<Proto.Range> ranges = parseRanges();
+    // An extension range takes bracketed options like a field does, as in
+    // `extensions 1000 [declaration = {number: 1000, type: ".Foo"}]`. Parsed
+    // only to get past them: the range declares no symbol.
+    parseFieldOptions();
     expectSymbol(';');
     return new ExtensionsDecl(startPos, currentPos(), ranges);
   }
