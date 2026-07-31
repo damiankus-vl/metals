@@ -345,6 +345,7 @@ class CompilerConfiguration(
       referenceCounter: CompletionItemPriority,
       overrideSourcePathMode: SourcePathMode,
       additionalClasspath: Seq[Path] = Nil,
+      additionalSourcePath: Seq[Path] = Nil,
       additionalOptions: Seq[String] = Nil,
   ) extends LazyCompiler {
 
@@ -352,8 +353,10 @@ class CompilerConfiguration(
 
     override protected def newCompiler(
         classpath: Seq[Path],
-        srcFiles: Supplier[ju.List[Path]] = () => Nil.asJava,
+        srcFilesWithoutAdditional: Supplier[ju.List[Path]] = () => Nil.asJava,
     ): PresentationCompiler = {
+      val srcFiles: Supplier[ju.List[Path]] = () =>
+        (srcFilesWithoutAdditional.get().asScala ++ additionalSourcePath).asJava
       val name = scalaTarget.scalac.getTarget().getUri
       val options = enrichWithReleaseOption(scalaTarget) ++ additionalOptions
       // Best Effort option `-Ybest-effort` is useless for PC,

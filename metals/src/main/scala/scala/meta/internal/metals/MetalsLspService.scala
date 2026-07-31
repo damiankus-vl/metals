@@ -1123,10 +1123,12 @@ abstract class MetalsLspService(
     val path = params.getTextDocument.getUri.toAbsolutePath
     savedFiles.add(path)
     mbt2.didSave(path)
-    // The Java presentation compiler caches resolved symbols from the
-    // synthesized proto outline and won't re-request them until restarted.
+    // Both presentation compilers cache what they resolved from the proto:
+    // the Java one caches symbols from the synthesized outline, the Scala one
+    // reads a source path fixed at construction time.
     if (path.isProtoFilename) {
       compilers.restartJavaCompilers()
+      compilers.restartScalaCompilers()
     }
     Future
       .sequence(
@@ -1218,11 +1220,12 @@ abstract class MetalsLspService(
     // A proto file can change on disk without ever going through didSave,
     // for example when a rename's workspace edit is applied to a file that
     // isn't open in an editor. Without this, the synthesized outline and
-    // the Java presentation compiler's cached symbols go stale until the
+    // what both presentation compilers cached from it go stale until the
     // next full restart.
     if (paths.exists(_.isProtoFilename)) {
       paths.filter(_.isProtoFilename).foreach(mbt2.didSave)
       compilers.restartJavaCompilers()
+      compilers.restartScalaCompilers()
     }
     futures += onChange(paths)
     Future.sequence(futures.result()).ignoreValue

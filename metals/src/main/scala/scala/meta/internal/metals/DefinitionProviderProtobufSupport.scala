@@ -2,7 +2,6 @@ package scala.meta.internal.metals
 
 import java.{util => ju}
 
-import scala.util.Try
 import scala.util.control.NonFatal
 
 import scala.meta.dialects
@@ -39,7 +38,12 @@ final class DefinitionProviderProtobufSupport(
       while (!found && it.hasNext) {
         found = ProtoJavaVirtualFile.isProtoJavaUri(it.next().getUri())
       }
-      found
+      // A proto-generated class can also be resolved without any location at
+      // all, unlike the Java PC's virtual SOURCE_PATH entry which already
+      // points at the outline. So also treat a locationless result as a
+      // proto-Java hit if it matches a known outline.
+      found ||
+      (res.locations.isEmpty && mbt.protoJavaOutlineFor(res.symbol).isDefined)
     }
 
   def enhanceWithProtobufDefinition(
@@ -92,6 +96,19 @@ final class DefinitionProviderProtobufSupport(
       result
   }
 
+  /**
+   * Where a proto-generated symbol is declared, for a compiler that reported
+   * it without any location of its own.
+   *
+   * Empty when the symbol is not proto-generated, which is the common case:
+   * callers use this only once their own lookup has come up empty.
+   */
+  def protoDefinitionLocations(symbol: String): List[Location] =
+    if (!protobufLspConfig().definition) Nil
+    else
+      handleProtoJavaDefinition(DefinitionResult.empty(symbol)).toList
+        .flatMap(_.locations.asScala)
+
   def handleProtoJavaDefinition(
       res: DefinitionResult
   ): Option[DefinitionResult] = {
@@ -117,7 +134,11 @@ final class DefinitionProviderProtobufSupport(
     }
 
     val generatedJavaFileUri =
-      Try(res.locations.get(0)).toOption.map(_.getUri())
+      res.locations.asScala.headOption
+        .map(_.getUri())
+        // No location at all (see [[hasProtoJavaLocation]]) -- look the
+        // outline up by symbol instead of via a virtual URI.
+        .orElse(mbt.protoJavaOutlineFor(res.symbol).map(_.uri().toString()))
     val protoFilePath =
       generatedJavaFileUri.flatMap(ProtoJavaVirtualFile.extractProtoPath)
 

@@ -80,6 +80,11 @@ final class DefinitionProvider(
     protobufLspConfig,
     mtags,
   )
+
+  /** See [[DefinitionProviderProtobufSupport.protoDefinitionLocations]]. */
+  def protoDefinitionLocations(symbol: String): List[Location] =
+    protobufDefinitions.protoDefinitionLocations(symbol)
+
   val destinationProvider = new DestinationProvider(
     index,
     buffers,
@@ -112,23 +117,23 @@ final class DefinitionProvider(
       ) {
         compilers()
           .definition(params, token)
-          .map {
-            case res if res.isEmpty =>
+          .map { res =>
+            // Checked before `res.isEmpty`: a proto-generated class can be
+            // resolved without any source file, and is then reported as a
+            // symbol with no location at all.
+            if (protobufDefinitions.hasProtoJavaLocation(res)) {
+              protobufDefinitions.handleProtoJavaDefinition(res)
+            } else if (res.isEmpty) {
               reportBuilder.setCompilerResult(res)
               Some(res)
-            case res =>
-              val hasProtoJavaLocation =
-                protobufDefinitions.hasProtoJavaLocation(res)
-              if (hasProtoJavaLocation) {
-                protobufDefinitions.handleProtoJavaDefinition(res)
-              } else {
-                val pathToDef = res.locations.asScala.head.getUri.toAbsolutePath
-                Some(
-                  res.copy(semanticdb =
-                    semanticdbs().textDocument(pathToDef).documentIncludingStale
-                  )
+            } else {
+              val pathToDef = res.locations.asScala.head.getUri.toAbsolutePath
+              Some(
+                res.copy(semanticdb =
+                  semanticdbs().textDocument(pathToDef).documentIncludingStale
                 )
-              }
+              )
+            }
           }
       } else {
         scribe.warn(
