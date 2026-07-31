@@ -10,6 +10,7 @@ import scala.meta.internal.metals.Buffers
 import scala.meta.internal.metals.Configs.ProtobufLspConfig
 import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.mtags.Symbol
+import scala.meta.internal.mtags.proto.ProtoLayout
 import scala.meta.internal.proto.codegen.java.JavaOutlineGenerator
 import scala.meta.internal.proto.diag.{SourceFile => ProtoSourceFile}
 import scala.meta.internal.proto.parse.{Parser => ProtoParser}
@@ -94,6 +95,26 @@ final class MbtProtobufWorkspaceSymbolProvider(
   }
 
   /**
+   * What the proto document says about the code generated from it, cached on the
+   * document so that a proto is parsed once per version of its text.
+   *
+   * Empty when the file cannot be parsed. A malformed proto also indexes as an
+   * empty document rather than an error, so a missing layout is not a signal
+   * that the mapping logic is wrong.
+   */
+  def protoLayout(doc: IndexedDocument): Option[ProtoLayout] =
+    doc.getOrComputeProtoLayout(() =>
+      try {
+        val input = doc.file.toInputFromBuffers(buffers)
+        Some(ProtoLayout.fromInput(input, javaPackagePrefix()))
+      } catch {
+        case NonFatal(e) =>
+          scribe.debug(s"Failed to read proto layout of ${doc.file}", e)
+          None
+      }
+    )
+
+  /**
    * All Java outlines generated from the given proto document, regardless of
    * package.
    */
@@ -103,9 +124,11 @@ final class MbtProtobufWorkspaceSymbolProvider(
         val input = doc.file.toInputFromBuffers(buffers)
         val source = new ProtoSourceFile(input.path, input.text)
         val file = ProtoParser.parse(source)
+        val layout =
+          ProtoLayout.fromProtoFile(file, input.path, javaPackagePrefix())
         val generator = new JavaOutlineGenerator(
           javaPackagePrefix(),
-          defaultOuterClassName(input.path),
+          layout.outerClassName,
         )
         val outputs = generator.generate(file)
 
@@ -135,7 +158,7 @@ final class MbtProtobufWorkspaceSymbolProvider(
             pc.Language.JAVA,
             javaContent,
             Seq(pkg),
-            Seq(fullClassName.replace('.', '/') + "#"),
+            layout.topLevelSymbolsOf(pkg, className),
           )
         }.toSeq
       } catch {
@@ -206,15 +229,4 @@ final class MbtProtobufWorkspaceSymbolProvider(
     }
   }
 
-  private def defaultOuterClassName(protoPath: String): String = {
-    val filename =
-      protoPath.split('/').lastOption.getOrElse("").stripSuffix(".proto")
-    val camel = filename
-      .split('_')
-      .iterator
-      .filter(_.nonEmpty)
-      .map(part => part.head.toUpper + part.tail)
-      .mkString
-    if (camel.nonEmpty) camel else "OuterClass"
-  }
 }

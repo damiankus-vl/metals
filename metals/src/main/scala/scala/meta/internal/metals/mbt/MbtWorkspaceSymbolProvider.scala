@@ -54,6 +54,7 @@ import scala.meta.internal.metals.WorkspaceSymbolQuery
 import scala.meta.internal.metals.debug.BuildTargetClasses
 import scala.meta.internal.mtags.Mtags
 import scala.meta.internal.mtags.Symbol
+import scala.meta.internal.mtags.proto.ProtoLayout
 import scala.meta.internal.tokenizers.UnexpectedInputEndException
 import scala.meta.io.AbsolutePath
 import scala.meta.metals.MetalsLanguageServer
@@ -141,47 +142,47 @@ class MbtWorkspaceSymbolProvider(
     documents.get(file).toSeq.flatMap(protobufWorkspace.allJavaOutlines)
 
   /**
+   * Which `.proto` a generated file or symbol came from, and the other way
+   * round. Every proto-to-generated-code question goes through it so that one
+   * set of rules answers them all.
+   */
+  lazy val protoOutputMapping: ProtoOutputMapping = new ProtoOutputMapping(
+    workspace,
+    protoLayoutOf = protoLayout,
+    filesInPackage = packageSymbol =>
+      documentsByPackage
+        .get(packageSymbol)
+        .iterator
+        .flatMap(_.asScala.iterator.map(AbsolutePath(_))),
+    documentOf = documents.get,
+    outlinesOf = protoJavaOutlines,
+    textOf = file => toInput(file).map(_.text),
+    allProtoFiles = () => documentsKeys.iterator.filter(_.isProtoFilename),
+  )
+
+  private def protoLayout(file: AbsolutePath): Option[ProtoLayout] =
+    for {
+      document <- documents.get(file)
+      if document.language.isProtobuf
+      layout <- protobufWorkspace.protoLayout(document)
+    } yield layout
+
+  /**
    * The synthesized Java outline declaring `classSymbol` (a SemanticDB
    * symbol, e.g. `com/example/jproto/WorkerProtocol#` or a nested
    * `com/example/jproto/WorkerProtocol#WorkResponse#`), if any. Lets
    * navigation place a symbol the compiler reported without any location of
    * its own, which is all it can report for a class it never read a source
    * file for.
-   *
-   * An outline records only its outer class in `toplevelSymbols`, so a
-   * nested message is matched by prefix (safe since the outer symbol always
-   * ends in `#`).
    */
   def protoJavaOutlineFor(classSymbol: String): Option[VirtualTextDocument] =
-    documents.keysIterator
-      .filter(_.isProtoFilename)
-      .flatMap(protoJavaOutlines)
-      .find(
-        _.toplevelSymbols().asScala.exists(top => classSymbol.startsWith(top))
+    protoOutputMapping
+      .originsOfSymbol(classSymbol)
+      .view
+      .flatMap(origin =>
+        protoOutputMapping.outlinesDeclaring(origin.proto, classSymbol)
       )
-
-  /**
-   * The synthesized outlines whose declared package encloses `packageName`,
-   * paired with the proto they were generated from: an outline declaring
-   * `com/example/api/jproto/` answers a query for
-   * `com/example/api/jproto/model/`.
-   *
-   * Every generator roots its output at the package the proto configures but
-   * disagrees on what sits below it -- an outer class, a per-file sub-package,
-   * or nothing. Matching only the root leaves that to the caller, so this
-   * covers generated code Metals did not synthesize itself.
-   *
-   * Lazy on purpose: callers stop at the first proto that fits, and the scan
-   * over every indexed proto is the expensive part.
-   */
-  def protoJavaOutlinesUnderPackage(
-      packageName: String
-  ): Iterator[(AbsolutePath, VirtualTextDocument)] =
-    for {
-      protoPath <- documents.keysIterator.filter(_.isProtoFilename)
-      outline <- protoJavaOutlines(protoPath).iterator
-      if outline.pkg.nonEmpty && packageName.startsWith(outline.pkg)
-    } yield (protoPath, outline)
+      .headOption
 
   private val turbineCompiler: TurbineCompiler[AbsolutePath] =
     new TurbineCompiler[AbsolutePath](

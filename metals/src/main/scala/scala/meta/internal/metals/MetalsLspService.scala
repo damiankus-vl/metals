@@ -1314,19 +1314,24 @@ abstract class MetalsLspService(
   ): CompletableFuture[util.List[Location]] =
     CancelTokens.future { token =>
       compilers.typeDefinition(position, token).map { result =>
-        // Check if any location points to a proto-java virtual file
+        // Check if any location points to an outline Metals synthesized from a
+        // `.proto` -- either the virtual entry the compiler resolved against or
+        // the file materialized for the client.
+        val mapping = mbt2.protoOutputMapping
         val hasProtoJavaLocation = result.locations.asScala.exists { loc =>
-          mbt.ProtoJavaVirtualFile.isProtoJavaUri(loc.getUri())
+          mapping.isSynthesizedOutline(loc.getUri())
         }
         if (hasProtoJavaLocation) {
           // Redirect to proto service/message definition
           val protoLocations = result.locations.asScala.flatMap { loc =>
-            if (mbt.ProtoJavaVirtualFile.isProtoJavaUri(loc.getUri())) {
-              // Extract proto path and find the service/message definition
-              mbt.ProtoJavaVirtualFile.extractProtoPath(loc.getUri()).flatMap {
-                protoPath =>
-                  findProtoTypeDefinition(protoPath, result.symbol)
-              }
+            if (mapping.isSynthesizedOutline(loc.getUri())) {
+              // Find the proto the outline came from, then the service/message
+              // definition inside it.
+              for {
+                file <- loc.getUri().toAbsolutePathSafe
+                origin <- mapping.originsOfFile(file).headOption
+                location <- findProtoTypeDefinition(origin.proto, result.symbol)
+              } yield location
             } else {
               Some(loc)
             }
