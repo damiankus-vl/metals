@@ -1,32 +1,37 @@
 package scala.meta.internal.metals.mbt
 
+import scala.collection.mutable
 import scala.util.control.NonFatal
 
 import scala.meta.internal.metals.Buffers
 import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.mtags.Symbol
+import scala.meta.internal.mtags.proto.ProtoLayout
 import scala.meta.internal.mtags.proto.ProtoMtagsV2
+import scala.meta.internal.mtags.proto.ProtoNaming
+import scala.meta.internal.semanticdb.Scala._
+import scala.meta.internal.{semanticdb => s}
 import scala.meta.io.AbsolutePath
 
 /**
- * Maps proto symbols to their corresponding Java symbols.
+ * Maps proto symbols to the generated Java symbols that could refer to them.
  *
- * This enables find-references from proto files to show usages in Java files
- * that import the proto-generated classes.
+ * This is what lets find-references and find-implementations start from a
+ * `.proto` and reach the Java code compiled against its output. Both directions
+ * of the naming rules live in [[ProtoNaming]], so this cannot drift from the
+ * mapping that reads generated code back to a proto.
  *
- * For a proto file with java_package option, this converts proto symbols
- * to the Java package namespace and generates all accessor method variants.
+ * Candidates, not answers: the field's type and cardinality are not known here,
+ * and neither is the layout the code on disk was generated with, so every shape
+ * a generator could have produced is emitted. The consumer validates them --
+ * `symbolMapping.keySet` feeds a bloom-filter query, which needs concrete
+ * strings and discards the misses.
  *
- * For example, proto symbol `com/example/User#name().` with java_package
- * "com.example.jproto" maps to:
- * - com/example/jproto/User#getName().
- * - com/example/jproto/User#hasName().
- * - com/example/jproto/User#Builder#setName().
- * - etc.
+ * For example proto symbol `com/example/User#name().` with `java_package`
+ * "com.example.jproto" maps to `com/example/jproto/User#getName().`,
+ * `…#hasName().`, `…/User#Builder#setName().`, and so on.
  */
 object ProtoJavaSymbolMapper {
-  private val grpcStubSuffixes =
-    Seq("ImplBase", "Stub", "BlockingStub", "FutureStub")
 
   /**
    * Result of mapping proto symbols to Java symbols.
@@ -64,96 +69,67 @@ object ProtoJavaSymbolMapper {
     try {
       val input = protoPath.toInputFromBuffers(buffers)
       val protoMtags = new ProtoMtagsV2(input, includeMembers = true)
-      val javaDoc = protoMtags.index()
+      val protoDocument = protoMtags.index()
+      val layout = protoMtags.layout
 
-      val javaPackage = protoMtags.javaPackage
-      val protoPackage = protoMtags.protoPackage
-      val javaMultipleFiles = protoMtags.javaMultipleFiles
-      val outerClassName = protoMtags.outerClassName
-
-      val symbolMapping = scala.collection.mutable.Map.empty[String, String]
-      val accessorMethods =
-        scala.collection.mutable.ListBuffer.empty[String]
+      val symbolMapping = mutable.Map.empty[String, String]
+      val accessorMethods = mutable.ListBuffer.empty[String]
 
       for (protoSymbol <- protoSymbols) {
-        val sym = Symbol(protoSymbol)
+        val symbol = Symbol(protoSymbol)
+        // Only `INTERFACE` reliably means something in a proto document: it is
+        // what distinguishes a service, and therefore an rpc, from a message and
+        // its fields. Enums index as `CLASS` and oneofs as `PACKAGE_OBJECT`.
+        def isService(candidate: String) =
+          protoDocument.symbols.exists(info =>
+            info.symbol == candidate && info.kind.isInterface
+          )
 
-        if (sym.isType) {
-          // Check if this is a service (interface) with RPC methods
-          val isService = javaDoc.symbols.exists { info =>
-            info.symbol == protoSymbol && info.kind.isInterface
-          }
-          if (isService) {
-            mapServiceSymbol(
-              protoSymbol,
-              sym,
-              protoPackage,
-              javaPackage,
-              javaMultipleFiles,
-              outerClassName,
-              symbolMapping,
-            )
-          } else {
+        if (symbol.isType) {
+          if (isService(protoSymbol))
+            mapServiceSymbol(protoSymbol, symbol, layout, symbolMapping)
+          else
             mapTypeSymbol(
               protoSymbol,
-              sym,
-              protoPackage,
-              javaPackage,
-              javaMultipleFiles,
-              outerClassName,
-              javaDoc,
+              symbol,
+              layout,
+              protoDocument,
               symbolMapping,
             )
-          }
-        } else if (sym.isMethod || (sym.isTerm && !sym.owner.isPackage)) {
-          // Check if this is an RPC method (owner is a service)
-          val ownerSymbol = sym.owner.value
-          val isRpcMethod = javaDoc.symbols.exists { info =>
-            info.symbol == ownerSymbol && info.kind.isInterface
-          }
-          if (isRpcMethod) {
+        } else if (
+          symbol.isMethod || (symbol.isTerm && !symbol.owner.isPackage)
+        ) {
+          if (isService(symbol.owner.value))
             mapRpcSymbol(
               protoSymbol,
-              sym,
-              protoPackage,
-              javaPackage,
-              javaMultipleFiles,
-              outerClassName,
+              symbol,
+              layout,
               symbolMapping,
               accessorMethods,
             )
-          } else {
+          else
             mapFieldSymbol(
               protoSymbol,
-              sym,
-              protoPackage,
-              javaPackage,
-              javaMultipleFiles,
-              outerClassName,
-              javaDoc,
+              symbol,
+              layout,
+              protoDocument,
               symbolMapping,
               accessorMethods,
             )
-          }
-        } else if (sym.isTerm && sym.owner.isPackage) {
-          // Top-level term - map directly
-          val javaSymbol =
-            convertProtoSymbolToJava(protoSymbol, protoPackage, javaPackage)
+        } else if (symbol.isTerm && symbol.owner.isPackage) {
           addSymbolMapping(
             symbolMapping,
-            javaSymbol,
+            javaSymbolOf(protoSymbol, layout),
             protoSymbol,
-            javaPackage,
-            javaMultipleFiles,
-            outerClassName,
+            layout,
           )
         }
       }
 
       ProtoToJavaResult(
         symbolMapping.toMap,
-        protoPackage,
-        javaPackage,
+        layout.protoPackage,
+        layout.javaPackage,
         accessorMethods.toSeq,
       )
     } catch {
@@ -165,471 +141,294 @@ object ProtoJavaSymbolMapper {
 
   /**
    * Maps a proto service symbol to its Java gRPC class equivalents.
-   * Services generate multiple Java classes: XxxGrpc, XxxImplBase, XxxStub, etc.
+   *
+   * A service becomes an outer class `SvcGrpc` holding `SvcImplBase`, `SvcStub`,
+   * `SvcBlockingStub` and `SvcFutureStub`. Metals' own outline puts `SvcImplBase`
+   * at the top level instead, so both nestings are emitted -- generated at one
+   * shape and searched for at the other, find-implementations would miss.
    */
   private def mapServiceSymbol(
       protoSymbol: String,
-      sym: Symbol,
-      protoPackage: String,
-      javaPackage: String,
-      javaMultipleFiles: Boolean,
-      outerClassName: String,
-      result: scala.collection.mutable.Map[String, String],
+      symbol: Symbol,
+      layout: ProtoLayout,
+      result: mutable.Map[String, String],
   ): Unit = {
-    val serviceName = sym.displayName
-    val javaOwner = convertProtoSymbolToJava(
-      sym.owner.value,
-      protoPackage,
-      javaPackage,
-    )
+    val serviceName = symbol.displayName
+    val packageSymbol = javaPackageSymbol(layout)
 
-    // Map the service class itself
-    val javaServiceSymbol =
-      convertProtoSymbolToJava(protoSymbol, protoPackage, javaPackage)
     addSymbolMapping(
       result,
-      javaServiceSymbol,
+      javaSymbolOf(protoSymbol, layout),
       protoSymbol,
-      javaPackage,
-      javaMultipleFiles,
-      outerClassName,
+      layout,
     )
 
-    // gRPC generates XxxGrpc outer class with nested classes
-    val grpcClassName = s"${serviceName}Grpc"
-    addSymbolMapping(
-      result,
-      s"$javaOwner$grpcClassName#",
-      protoSymbol,
-      javaPackage,
-      javaMultipleFiles,
-      outerClassName,
-    )
+    val grpcClassSymbol =
+      Symbols.Global(packageSymbol, Descriptor.Type(s"${serviceName}Grpc"))
+    addSymbolMapping(result, grpcClassSymbol, protoSymbol, layout)
 
-    // Nested stub classes
-    val stubClasses = Seq(
-      s"${serviceName}ImplBase",
-      s"${serviceName}Stub",
-      s"${serviceName}BlockingStub",
-      s"${serviceName}FutureStub",
-    )
-    for (stubClass <- stubClasses) {
+    for (stubName <- stubClassNames(serviceName)) {
       addSymbolMapping(
         result,
-        s"$javaOwner$grpcClassName#$stubClass#",
+        Symbols.Global(grpcClassSymbol, Descriptor.Type(stubName)),
         protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
+        layout,
+      )
+      addSymbolMapping(
+        result,
+        Symbols.Global(packageSymbol, Descriptor.Type(stubName)),
+        protoSymbol,
+        layout,
       )
     }
   }
 
   /**
    * Maps a proto RPC symbol to its Java gRPC method equivalents.
-   * RPC methods are called from ImplBase, Stub, BlockingStub, and FutureStub classes.
+   *
+   * The method is declared on every stub class, under both the nested and the
+   * top-level shape, and additionally without its package: that is what javac
+   * reports for a class it could not resolve, which is exactly the case this
+   * mapping exists to cover.
    */
   private def mapRpcSymbol(
       protoSymbol: String,
-      sym: Symbol,
-      protoPackage: String,
-      javaPackage: String,
-      javaMultipleFiles: Boolean,
-      outerClassName: String,
-      result: scala.collection.mutable.Map[String, String],
-      accessorMethods: scala.collection.mutable.ListBuffer[String],
+      symbol: Symbol,
+      layout: ProtoLayout,
+      result: mutable.Map[String, String],
+      accessorMethods: mutable.ListBuffer[String],
   ): Unit = {
-    val rpcName = sym.displayName
-    val javaMethodName = decapitalize(rpcName)
-    val ownerSymbol = sym.owner.value
-    val serviceName = Symbol(ownerSymbol).displayName
+    val javaMethodName = ProtoNaming.decapitalize(symbol.displayName)
+    val serviceName = symbol.owner.displayName
+    val packageSymbol = javaPackageSymbol(layout)
+    val grpcClassSymbol =
+      Symbols.Global(packageSymbol, Descriptor.Type(s"${serviceName}Grpc"))
 
-    val javaOwner = convertProtoSymbolToJava(
-      Symbol(ownerSymbol).owner.value,
-      protoPackage,
-      javaPackage,
-    )
+    for (stubName <- stubClassNames(serviceName)) {
+      val qualifiedStubs = Seq(
+        Symbols.Global(grpcClassSymbol, Descriptor.Type(stubName)),
+        Symbols.Global(packageSymbol, Descriptor.Type(stubName)),
+      ).distinct
+      val bareStub = Symbols.Global(Symbols.None, Descriptor.Type(stubName))
 
-    // gRPC class name
-    val grpcClassName = s"${serviceName}Grpc"
-
-    // All stub class variants
-    val stubClasses = Seq(
-      s"${serviceName}ImplBase",
-      s"${serviceName}Stub",
-      s"${serviceName}BlockingStub",
-      s"${serviceName}FutureStub",
-    )
-
-    // Map method in all stub classes
-    for (stubClass <- stubClasses) {
-      // Full symbol form for method
-      addSymbolMapping(
-        result,
-        s"$javaOwner$grpcClassName#$stubClass#$javaMethodName().",
-        protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
+      for (stubSymbol <- qualifiedStubs) {
+        addSymbolMapping(
+          result,
+          Symbols.Global(stubSymbol, Descriptor.Method(javaMethodName, "()")),
+          protoSymbol,
+          layout,
+        )
+        // The stub class also maps to the rpc, so that find-references can tell
+        // an override of it from an unrelated method of the same name.
+        addSymbolMapping(result, stubSymbol, protoSymbol, layout)
+      }
+      for (
+        descriptor <- Seq(
+          Descriptor.Method(javaMethodName, "()"),
+          Descriptor.Type(javaMethodName),
+        )
       )
-      // Short form for unresolved references
-      addSymbolMapping(
-        result,
-        s"$stubClass#$javaMethodName().",
-        protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
-      )
-      addSymbolMapping(
-        result,
-        s"$stubClass#$javaMethodName#",
-        protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
-      )
-
-      // Also add the class symbol for implementation search (for find-refs override detection)
-      // This maps the proto service/RPC symbol to the Java stub class
-      addSymbolMapping(
-        result,
-        s"$javaOwner$grpcClassName#$stubClass#",
-        protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
-      )
+        addSymbolMapping(
+          result,
+          Symbols.Global(bareStub, descriptor),
+          protoSymbol,
+          layout,
+        )
     }
 
-    // Add the method name to search for
     accessorMethods += javaMethodName
   }
 
-  /**
-   * Decapitalizes the first letter of a string.
-   * e.g., "Echo" -> "echo", "GetUser" -> "getUser"
-   */
-  private def decapitalize(s: String): String = {
-    if (s.isEmpty) s
-    else s.head.toLower + s.tail
-  }
+  private def stubClassNames(serviceName: String): Seq[String] =
+    ProtoNaming.grpcStubSuffixes.map(suffix => serviceName + suffix)
 
-  def isGrpcStubClassSymbol(symbol: String): Boolean = {
-    val sym = Symbol(symbol)
-    val className = sym.displayName
-    grpcStubSuffixes.exists(className.endsWith)
-  }
+  def isGrpcStubClassSymbol(symbol: String): Boolean =
+    ProtoNaming.isGrpcStubName(Symbol(symbol).displayName)
 
   def isGrpcStubMethodSymbol(symbol: String): Boolean = {
-    val sym = Symbol(symbol)
-    sym.isMethod && isGrpcStubClassSymbol(sym.owner.value)
+    val parsed = Symbol(symbol)
+    parsed.isMethod && isGrpcStubClassSymbol(parsed.owner.value)
   }
 
   /**
-   * Maps a proto type symbol (message or enum) to its Java equivalent.
+   * Maps a proto type symbol (message or enum) to its Java equivalent, plus
+   * every Java-shaped name the proto document itself records for it.
    */
   private def mapTypeSymbol(
       protoSymbol: String,
-      sym: Symbol,
-      protoPackage: String,
-      javaPackage: String,
-      javaMultipleFiles: Boolean,
-      outerClassName: String,
-      javaDoc: scala.meta.internal.semanticdb.TextDocument,
-      result: scala.collection.mutable.Map[String, String],
+      symbol: Symbol,
+      layout: ProtoLayout,
+      protoDocument: s.TextDocument,
+      result: mutable.Map[String, String],
   ): Unit = {
-    val className = sym.displayName
-    val javaClassSymbol =
-      convertProtoSymbolToJava(protoSymbol, protoPackage, javaPackage)
     addSymbolMapping(
       result,
-      javaClassSymbol,
+      javaSymbolOf(protoSymbol, layout),
       protoSymbol,
-      javaPackage,
-      javaMultipleFiles,
-      outerClassName,
+      layout,
     )
 
-    // Also find all Java occurrences that reference this type
-    javaDoc.occurrences.foreach { occ =>
-      if (
-        occ.symbol.contains(s"/$className#") ||
-        occ.symbol.startsWith(s"$className#") ||
-        occ.symbol.contains(s"#$className#")
-      ) {
-        result(occ.symbol) = protoSymbol
-      }
-    }
+    val declarationName = symbol.displayName
+    for {
+      occurrence <- protoDocument.occurrences
+      if declares(occurrence.symbol, declarationName)
+    } result(occurrence.symbol) = protoSymbol
   }
+
+  /**
+   * Whether `symbol`'s owner chain passes through a level named `name`.
+   *
+   * Compared element by element rather than as a substring, so a message named
+   * `User` is not matched by a `UserGroup` at the same level, and a nested
+   * `Container#Inner#` is reached by both `Container` and `Inner` -- which is
+   * correct, since both own it.
+   */
+  private def declares(symbol: String, name: String): Boolean =
+    ProtoLayout.nameChainAfterPackage(Symbol(symbol)).contains(name)
 
   /**
    * Maps a proto field symbol to its Java accessor method equivalents.
    *
-   * For enum values (ALL_CAPS), maps to Java static field.
-   * For regular fields, maps to getter/setter methods.
-   *
-   * Also maps short-name symbols (without package prefix) for cases where
-   * javac couldn't fully resolve the proto-generated classes.
+   * For enum values (ALL_CAPS), maps to Java static field. For regular fields,
+   * maps to getter/setter methods, on both the message and its builder, and in
+   * the package-less shape javac reports for an unresolved class.
    */
   private def mapFieldSymbol(
       protoSymbol: String,
-      sym: Symbol,
-      protoPackage: String,
-      javaPackage: String,
-      javaMultipleFiles: Boolean,
-      outerClassName: String,
-      javaDoc: scala.meta.internal.semanticdb.TextDocument,
-      result: scala.collection.mutable.Map[String, String],
-      accessorMethods: scala.collection.mutable.ListBuffer[String],
+      symbol: Symbol,
+      layout: ProtoLayout,
+      protoDocument: s.TextDocument,
+      result: mutable.Map[String, String],
+      accessorMethods: mutable.ListBuffer[String],
   ): Unit = {
-    val fieldName = sym.displayName
-    val ownerSymbol = sym.owner.value
+    val fieldName = symbol.displayName
+    val javaOwnerSymbol = javaSymbolOf(symbol.owner.value, layout)
+    val javaClassName = Symbol(javaOwnerSymbol).displayName
+    // The owner without its package, which is all javac reports when it could
+    // not resolve the generated class.
+    val bareOwnerSymbol =
+      Symbols.Global(Symbols.None, Descriptor.Type(javaClassName))
 
-    val javaOwner =
-      convertProtoSymbolToJava(ownerSymbol, protoPackage, javaPackage)
-    val javaClassName = Symbol(javaOwner).displayName
-
-    // Check if this is an enum value (ALL_CAPS)
-    val isEnumValue = fieldName.forall(c => c.isUpper || c == '_' || c.isDigit)
-
-    if (isEnumValue) {
-      // Enum value - map to Java static field
-      val javaEnumValueSymbol = s"$javaOwner$fieldName."
-      addSymbolMapping(
-        result,
-        javaEnumValueSymbol,
-        protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
+    if (ProtoNaming.isAllCaps(fieldName)) {
+      // A Java enum constant is a term. The method shape covers the accessor the
+      // proto indexer emits for it, and the type shape is what javac reports
+      // before it has resolved the enum at all.
+      for (
+        descriptor <- Seq(
+          Descriptor.Term(fieldName),
+          Descriptor.Method(fieldName, "()"),
+        )
       )
-      // Also map method form just in case
-      addSymbolMapping(
-        result,
-        s"$javaOwner$fieldName().",
-        protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
+        addSymbolMapping(
+          result,
+          Symbols.Global(javaOwnerSymbol, descriptor),
+          protoSymbol,
+          layout,
+        )
+      for (
+        descriptor <- Seq(
+          Descriptor.Term(fieldName),
+          Descriptor.Type(fieldName),
+        )
       )
-      // Short-name variants for unresolved references
-      addSymbolMapping(
-        result,
-        s"$javaClassName#$fieldName.",
-        protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
-      )
-      addSymbolMapping(
-        result,
-        s"$javaClassName#$fieldName#",
-        protoSymbol,
-        javaPackage,
-        javaMultipleFiles,
-        outerClassName,
-      )
+        addSymbolMapping(
+          result,
+          Symbols.Global(bareOwnerSymbol, descriptor),
+          protoSymbol,
+          layout,
+        )
     } else {
-      // Regular field - map to Java getter/setter methods
-      val javaMethodNames = protoFieldToJavaMethods(fieldName)
+      val javaMethodNames = ProtoNaming.javaAccessorNames(fieldName)
       accessorMethods ++= javaMethodNames
 
-      javaMethodNames.foreach { methodName =>
-        // Method on message class: Message#getXxx()
-        addSymbolMapping(
-          result,
-          s"$javaOwner$methodName().",
-          protoSymbol,
-          javaPackage,
-          javaMultipleFiles,
-          outerClassName,
-        )
-        // Method on builder class: Message#Builder#setXxx()
-        addSymbolMapping(
-          result,
-          s"${javaOwner}Builder#$methodName().",
-          protoSymbol,
-          javaPackage,
-          javaMultipleFiles,
-          outerClassName,
-        )
+      // protoc declares the setters on a `Builder` nested in the message, and
+      // Metals' own outline on a top-level `<Msg>Builder`, so both spellings are
+      // emitted -- generated at one and searched for at the other, a setter call
+      // site would not be found.
+      def withBuilders(owner: String) =
+        Seq(
+          owner,
+          Symbols.Global(owner, Descriptor.Type("Builder")),
+          Symbols.Global(
+            Symbol(owner).owner.value,
+            Descriptor.Type(Symbol(owner).displayName + "Builder"),
+          ),
+        ).distinct
 
-        // Short-name variants for unresolved references (when proto-generated
-        // classes don't exist on classpath, javac produces symbols like
-        // `ClassName#methodName#` instead of fully qualified)
-        addSymbolMapping(
-          result,
-          s"$javaClassName#$methodName().",
-          protoSymbol,
-          javaPackage,
-          javaMultipleFiles,
-          outerClassName,
-        )
-        addSymbolMapping(
-          result,
-          s"$javaClassName#$methodName#",
-          protoSymbol,
-          javaPackage,
-          javaMultipleFiles,
-          outerClassName,
-        )
-        // Also Builder variants
-        addSymbolMapping(
-          result,
-          s"${javaClassName}Builder#$methodName().",
-          protoSymbol,
-          javaPackage,
-          javaMultipleFiles,
-          outerClassName,
-        )
-        addSymbolMapping(
-          result,
-          s"${javaClassName}Builder#$methodName#",
-          protoSymbol,
-          javaPackage,
-          javaMultipleFiles,
-          outerClassName,
-        )
-        addSymbolMapping(
-          result,
-          s"$javaClassName#Builder#$methodName().",
-          protoSymbol,
-          javaPackage,
-          javaMultipleFiles,
-          outerClassName,
-        )
-        addSymbolMapping(
-          result,
-          s"$javaClassName#Builder#$methodName#",
-          protoSymbol,
-          javaPackage,
-          javaMultipleFiles,
-          outerClassName,
-        )
-      }
+      for {
+        methodName <- javaMethodNames
+        owner <- withBuilders(javaOwnerSymbol)
+      } addSymbolMapping(
+        result,
+        Symbols.Global(owner, Descriptor.Method(methodName, "()")),
+        protoSymbol,
+        layout,
+      )
 
-      // Find actual occurrences in javaDoc that match this field
-      javaDoc.occurrences.foreach { occ =>
-        val isOwnerMatch =
-          occ.symbol.contains(s"/$javaClassName#") ||
-            occ.symbol.startsWith(s"$javaClassName#") ||
-            occ.symbol.contains(s"#$javaClassName#")
-        if (
-          isOwnerMatch &&
-          javaMethodNames.exists(m =>
-            occ.symbol.contains(s"#$m(") || occ.symbol.endsWith(s"#$m().")
-          )
-        ) {
-          result(occ.symbol) = protoSymbol
-        }
-      }
+      // Without a package, which is all javac reports for a class it could not
+      // resolve -- and then it cannot tell a method from a type either.
+      for {
+        methodName <- javaMethodNames
+        owner <- withBuilders(bareOwnerSymbol)
+        descriptor <- Seq(
+          Descriptor.Method(methodName, "()"),
+          Descriptor.Type(methodName),
+        )
+      } addSymbolMapping(
+        result,
+        Symbols.Global(owner, descriptor),
+        protoSymbol,
+        layout,
+      )
+
+      // Whatever the proto document itself records for this field beats any
+      // candidate generated above, being what the indexer actually emitted.
+      for {
+        occurrence <- protoDocument.occurrences
+        occurrenceSymbol = Symbol(occurrence.symbol)
+        if declares(occurrence.symbol, javaClassName) &&
+          javaMethodNames.contains(occurrenceSymbol.displayName)
+      } result(occurrence.symbol) = protoSymbol
     }
   }
 
   /**
-   * Converts a proto package symbol to a Java package symbol.
-   * e.g., com/example/User# with protoPackage "com.example" and
-   * javaPackage "com.example.jproto" -> com/example/jproto/User#
+   * The same declaration re-rooted at the generated code's package: proto symbol
+   * `com/example/User#` with `java_package` "com.example.jproto" becomes
+   * `com/example/jproto/User#`.
+   *
+   * Rebuilt descriptor by descriptor, so it does not care what the proto package
+   * was -- including the case where the proto declares none.
    */
   def convertProtoSymbolToJava(
       protoSymbol: String,
-      protoPackage: String,
       javaPackage: String,
-  ): String = {
-    val protoPrefix = protoPackage.replace('.', '/') + "/"
-    val javaPrefix = javaPackage.replace('.', '/') + "/"
-    if (protoSymbol.startsWith(protoPrefix)) {
-      javaPrefix + protoSymbol.stripPrefix(protoPrefix)
-    } else {
-      // No package prefix, just add java package
-      javaPrefix + protoSymbol
-    }
-  }
-
-  /**
-   * Generates all Java method names that correspond to a proto field.
-   *
-   * This mirrors the accessor methods generated by ProtoMtagsV2:
-   * - indexScalarField generates get, has, set, clear, add, addAll, etc.
-   * - indexMapField generates getMap, contains, put, putAll, remove, etc.
-   *
-   * We generate all variants since we don't know the field type at this point.
-   */
-  private def protoFieldToJavaMethods(protoFieldName: String): Seq[String] = {
-    val camelCase = snakeToCamel(protoFieldName)
-    Seq(
-      // Scalar field getters (from ProtoMtagsV2.indexScalarField)
-      s"get$camelCase",
-      s"has$camelCase",
-      s"get${camelCase}Bytes",
-      // Repeated field methods
-      s"get${camelCase}List",
-      s"get${camelCase}Count",
-      // Map field methods (from ProtoMtagsV2.indexMapField)
-      s"get${camelCase}Map",
-      s"contains$camelCase",
-      s"get${camelCase}OrDefault",
-      s"get${camelCase}OrThrow",
-      // Builder methods
-      s"set$camelCase",
-      s"clear$camelCase",
-      s"set${camelCase}Bytes",
-      s"add$camelCase",
-      s"addAll$camelCase",
-      s"put$camelCase",
-      s"putAll$camelCase",
-      s"remove$camelCase",
+  ): String =
+    ProtoLayout.reroot(
+      Symbol(protoSymbol),
+      ProtoLayout.packageSymbolOf(javaPackage),
     )
-  }
 
-  /**
-   * Converts snake_case to CamelCase.
-   * Same logic as ProtoMtagsV2.snakeToCamel.
-   */
-  private def snakeToCamel(snakeCase: String): String =
-    snakeCase.split("_").map(_.capitalize).mkString
+  private def javaSymbolOf(protoSymbol: String, layout: ProtoLayout): String =
+    ProtoLayout.reroot(Symbol(protoSymbol), javaPackageSymbol(layout))
+
+  private def javaPackageSymbol(layout: ProtoLayout): String =
+    ProtoLayout.packageSymbolOf(layout.javaPackage)
 
   private def addSymbolMapping(
-      result: scala.collection.mutable.Map[String, String],
+      result: mutable.Map[String, String],
       javaSymbol: String,
       protoSymbol: String,
-      javaPackage: String,
-      javaMultipleFiles: Boolean,
-      outerClassName: String,
+      layout: ProtoLayout,
   ): Unit = {
     result(javaSymbol) = protoSymbol
-    singleFileOuterClassVariant(
-      javaSymbol,
-      javaPackage,
-      javaMultipleFiles,
-      outerClassName,
-    ).foreach { alt =>
-      result(alt) = protoSymbol
-    }
-  }
-
-  private def singleFileOuterClassVariant(
-      javaSymbol: String,
-      javaPackage: String,
-      javaMultipleFiles: Boolean,
-      outerClassName: String,
-  ): Option[String] = {
-    if (javaMultipleFiles || outerClassName.isEmpty) {
-      None
-    } else {
-      val javaPrefix =
-        if (javaPackage.nonEmpty) javaPackage.replace('.', '/') + "/"
-        else ""
-      if (javaSymbol.startsWith(javaPrefix)) {
-        val suffix = javaSymbol.stripPrefix(javaPrefix)
-        if (suffix.startsWith(s"$outerClassName#")) None
-        else Some(s"$javaPrefix$outerClassName#$suffix")
-      } else if (javaSymbol.startsWith(s"$outerClassName#")) {
-        None
-      } else {
-        Some(s"$outerClassName#$javaSymbol")
-      }
+    // In the default layout every declaration is nested in the outer class, so
+    // the same member has a second, deeper symbol. The name comes from the
+    // layout, so it carries protoc's collision rule with it.
+    if (!layout.javaMultipleFiles && layout.outerClassName.nonEmpty) {
+      ProtoLayout
+        .nestedInType(Symbol(javaSymbol), layout.outerClassName)
+        .foreach(variant => result(variant) = protoSymbol)
     }
   }
 }

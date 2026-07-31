@@ -196,4 +196,170 @@ class ProtoPCScalaSuite extends BaseProtoPCSuite("proto-pc-scala") {
       )
     } yield ()
   }
+
+  // Code a generator wrote to disk is a real source, so it keeps the first slot
+  // and the proto is only an extra entry.
+  //
+  // The layout below -- a sub-package under `java_package`, no outer class, no
+  // accessor prefixes -- is nothing Metals synthesizes, so matching it can rely
+  // only on the configured package and the declared name.
+  test("scala-generated-source-comes-before-proto") {
+    cleanWorkspace()
+    for {
+      _ <- initialize(
+        """|/metals.json
+           |{"a": {}}
+           |/a/src/main/proto/model.proto
+           |syntax = "proto3";
+           |package com.example.api;
+           |option java_package = "com.example.api.jproto";
+           |option java_multiple_files = true;
+           |message User {
+           |  string full_name = 1;
+           |}
+           |/a/src/main/scala/com/example/api/jproto/model/User.scala
+           |package com.example.api.jproto.model
+           |class User(val fullName: String)
+           |/a/src/main/scala/com/example/Consumer.scala
+           |package com.example
+           |import com.example.api.jproto.model.User
+           |object Consumer {
+           |  def f(user: User): String = user.fullName
+           |}
+           |""".stripMargin
+      )
+      _ <- server.didOpen("a/src/main/proto/model.proto")
+      _ <- server.didOpen("a/src/main/scala/com/example/Consumer.scala")
+      _ <- server.didFocus("a/src/main/scala/com/example/Consumer.scala")
+      _ = assertNoDiagnostics()
+      // The generated class, then the proto. No outline: the generator's file is
+      // on disk, so the stub has nothing to add -- true even though its package
+      // (`...jproto.model`) is not the outline's (`...jproto`), which no name
+      // comparison could have told.
+      _ <- assertDefinitionFileOrder(
+        "a/src/main/scala/com/example/Consumer.scala",
+        "def f(user: Us@@er)",
+        List(
+          "a/src/main/scala/com/example/api/jproto/model/User.scala",
+          "a/src/main/proto/model.proto",
+        ),
+      )
+      _ <- assertProtoDefinition(
+        "a/src/main/scala/com/example/Consumer.scala",
+        "def f(user: Us@@er)",
+        """|a/src/main/proto/model.proto:5:9: definition
+           |message User {
+           |        ^^^^
+           |""".stripMargin,
+      )
+    } yield ()
+  }
+
+  // Generated code laid out exactly where Metals puts its outline. The outline
+  // stands in for code that is not on disk, so once the code is there it has to
+  // win -- otherwise every use type-checks against a stub carrying only what
+  // the `.proto` implies, and the generator's own additions look missing.
+  test("scala-generated-source-not-shadowed-by-outline") {
+    cleanWorkspace()
+    for {
+      _ <- initialize(
+        """|/metals.json
+           |{"a": {}}
+           |/a/src/main/proto/model.proto
+           |syntax = "proto3";
+           |package com.example.api;
+           |option java_package = "com.example.api.jproto";
+           |option java_multiple_files = true;
+           |message User {
+           |  string full_name = 1;
+           |}
+           |/a/src/main/scala/com/example/api/jproto/User.scala
+           |package com.example.api.jproto
+           |class User(val fullName: String) {
+           |  def displayName: String = fullName
+           |}
+           |/a/src/main/scala/com/example/Consumer.scala
+           |package com.example
+           |import com.example.api.jproto.User
+           |object Consumer {
+           |  def f(user: User): String = user.displayName
+           |}
+           |""".stripMargin
+      )
+      _ <- server.didOpen("a/src/main/proto/model.proto")
+      _ <- server.didOpen("a/src/main/scala/com/example/Consumer.scala")
+      _ <- server.didFocus("a/src/main/scala/com/example/Consumer.scala")
+      _ = assertNoDiagnostics()
+      completions <- server.completion(
+        "a/src/main/scala/com/example/Consumer.scala",
+        "user.displa@@",
+      )
+      // Declared only by the real source.
+      _ = assert(
+        completions.contains("displayName"),
+        s"expected displayName in completions:\n$completions",
+      )
+      // The real source is the definition, and the proto is still offered as
+      // where it came from -- but no outline, which would only be a stub copy
+      // of the file already listed.
+      _ <- assertDefinitionFileOrder(
+        "a/src/main/scala/com/example/Consumer.scala",
+        "def f(user: Us@@er)",
+        List(
+          "a/src/main/scala/com/example/api/jproto/User.scala",
+          "a/src/main/proto/model.proto",
+        ),
+      )
+    } yield ()
+  }
+
+  // A field reached through an accessor the generator named itself, rather
+  // than through protoc-java's `get` prefix.
+  test("scala-navigates-from-unprefixed-accessor") {
+    cleanWorkspace()
+    for {
+      _ <- initialize(
+        """|/metals.json
+           |{"a": {}}
+           |/a/src/main/proto/model.proto
+           |syntax = "proto3";
+           |package com.example.api;
+           |option java_package = "com.example.api.jproto";
+           |option java_multiple_files = true;
+           |message User {
+           |  string full_name = 1;
+           |}
+           |/a/src/main/scala/com/example/api/jproto/model/User.scala
+           |package com.example.api.jproto.model
+           |class User(val fullName: String)
+           |/a/src/main/scala/com/example/Consumer.scala
+           |package com.example
+           |import com.example.api.jproto.model.User
+           |object Consumer {
+           |  def f(user: User): String = user.fullName
+           |}
+           |""".stripMargin
+      )
+      _ <- server.didOpen("a/src/main/proto/model.proto")
+      _ <- server.didOpen("a/src/main/scala/com/example/Consumer.scala")
+      _ <- server.didFocus("a/src/main/scala/com/example/Consumer.scala")
+      _ = assertNoDiagnostics()
+      _ <- assertDefinitionFileOrder(
+        "a/src/main/scala/com/example/Consumer.scala",
+        "user.full@@Name",
+        List(
+          "a/src/main/scala/com/example/api/jproto/model/User.scala",
+          "a/src/main/proto/model.proto",
+        ),
+      )
+      _ <- assertProtoDefinition(
+        "a/src/main/scala/com/example/Consumer.scala",
+        "user.full@@Name",
+        """|a/src/main/proto/model.proto:6:10: definition
+           |  string full_name = 1;
+           |         ^^^^^^^^^
+           |""".stripMargin,
+      )
+    } yield ()
+  }
 }

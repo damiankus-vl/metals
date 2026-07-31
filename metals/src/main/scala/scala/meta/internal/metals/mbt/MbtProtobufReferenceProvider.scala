@@ -307,7 +307,6 @@ final class MbtProtobufReferenceProvider(
             Some(
               ProtoJavaSymbolMapper.convertProtoSymbolToJava(
                 protoSymbol,
-                result.protoPackage,
                 result.javaPackage,
               )
             )
@@ -315,7 +314,6 @@ final class MbtProtobufReferenceProvider(
             Some(
               ProtoJavaSymbolMapper.convertProtoSymbolToJava(
                 sym.owner.value,
-                result.protoPackage,
                 result.javaPackage,
               )
             )

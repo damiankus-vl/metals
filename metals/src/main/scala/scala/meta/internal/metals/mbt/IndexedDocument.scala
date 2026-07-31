@@ -18,6 +18,7 @@ import scala.meta.internal.metals.MetalsEnrichments._
 import scala.meta.internal.metals.StringBloomFilter
 import scala.meta.internal.mtags.Mtags
 import scala.meta.internal.mtags.Symbol
+import scala.meta.internal.mtags.proto.ProtoLayout
 import scala.meta.internal.mtags.proto.ProtoMtagsV2
 import scala.meta.io.AbsolutePath
 import scala.meta.pc.SemanticdbCompilationUnit
@@ -57,8 +58,27 @@ case class IndexedDocument(
     result
   }
 
+  // What the proto says about the code generated from it. Cached alongside the
+  // outlines and invalidated with them, since both depend on the file's text and
+  // on the configured Java package prefix.
+  private val cachedProtoLayout: AtomicReference[Option[ProtoLayout]] =
+    new AtomicReference(null)
+
+  def getOrComputeProtoLayout(
+      compute: () => Option[ProtoLayout]
+  ): Option[ProtoLayout] = {
+    var result = cachedProtoLayout.get()
+    if (result == null) {
+      val computed = compute()
+      cachedProtoLayout.compareAndSet(null, computed)
+      result = cachedProtoLayout.get()
+    }
+    result
+  }
+
   def clearProtobufJavaOutlinesCache(): Unit = {
     cachedProtobufJavaOutlines.set(null)
+    cachedProtoLayout.set(null)
   }
 
   /**

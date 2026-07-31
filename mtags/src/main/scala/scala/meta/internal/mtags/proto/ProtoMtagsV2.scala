@@ -43,36 +43,27 @@ class ProtoMtagsV2(
     Parser.parse(source)
   }
 
+  /** What the file says about the code generated from it. */
+  lazy val layout: ProtoLayout =
+    ProtoLayout.fromProtoFile(protoFile, input.path)
+
   /** The java_package option value, or falls back to proto package */
-  lazy val javaPackage: String = getJavaPackage(protoFile)
+  def javaPackage: String = layout.javaPackage
 
   /** The proto package from the package declaration */
-  lazy val protoPackage: String = {
-    val pkg = protoFile.pkg()
-    if (pkg.isPresent) pkg.get().fullName() else ""
-  }
+  def protoPackage: String = layout.protoPackage
 
   /** The java_outer_classname option value, or generated from filename */
-  lazy val outerClassName: String = getOuterClassName(protoFile)
+  def outerClassName: String = layout.outerClassName
 
   /** Whether java_multiple_files=true is set */
-  lazy val javaMultipleFiles: Boolean = getJavaMultipleFiles(protoFile)
+  def javaMultipleFiles: Boolean = layout.javaMultipleFiles
 
   /**
    * Returns the semanticdb packages for this proto file.
    * Includes both proto package and java_package (if different).
    */
-  def semanticdbPackages: Seq[String] = {
-    val protoPackages =
-      if (protoPackage.isEmpty) Seq(Symbols.EmptyPackage)
-      else Seq(protoPackage.replace('.', '/') + "/")
-
-    if (javaPackage.nonEmpty && javaPackage != protoPackage) {
-      protoPackages :+ (javaPackage.replace('.', '/') + "/")
-    } else {
-      protoPackages
-    }
-  }
+  def semanticdbPackages: Seq[String] = layout.semanticdbPackages
 
   override def indexRoot(): Unit = {
     try {
@@ -372,10 +363,7 @@ class ProtoMtagsV2(
    * Decapitalizes the first letter of a string.
    * e.g., "Echo" -> "echo", "GetUser" -> "getUser"
    */
-  private def decapitalize(s: String): String = {
-    if (s.isEmpty) s
-    else s.head.toLower + s.tail
-  }
+  private def decapitalize(s: String): String = ProtoNaming.decapitalize(s)
 
   /**
    * Emit a method symbol with specific language tag.
@@ -410,94 +398,9 @@ class ProtoMtagsV2(
     Position.Range(input, ident.position(), ident.endPosition())
   }
 
-  /**
-   * Converts snake_case to CamelCase (first letter uppercase).
-   * e.g., "first_name" -> "FirstName"
-   */
-  private def snakeToCamel(snakeCase: String): String = {
-    snakeCase.split("_").map(_.capitalize).mkString
-  }
+  private def snakeToCamel(snakeCase: String): String =
+    ProtoNaming.snakeToUpperCamel(snakeCase)
 
-  /**
-   * Converts snake_case to camelCase (first letter lowercase).
-   * e.g., "first_name" -> "firstName"
-   */
-  private def snakeToCamelLower(snakeCase: String): String = {
-    val camel = snakeToCamel(snakeCase)
-    if (camel.nonEmpty) camel.head.toLower + camel.tail else camel
-  }
-
-  private def getJavaPackage(file: ProtoFile): String = {
-    file.options().asScala.foreach { option =>
-      val optionName = option
-        .name()
-        .asScala
-        .map(_.value())
-        .mkString(".")
-      if (optionName == "java_package") {
-        option.value() match {
-          case ident: Ident =>
-            val v = ident.value()
-            if (v.startsWith("\"") && v.endsWith("\""))
-              return v.substring(1, v.length - 1)
-            return v
-          case _ =>
-        }
-      }
-    }
-    // Fall back to proto package
-    val pkg = file.pkg()
-    if (pkg.isPresent) pkg.get().fullName() else ""
-  }
-
-  private def getOuterClassName(file: ProtoFile): String = {
-    file.options().asScala.foreach { option =>
-      val optionName = option
-        .name()
-        .asScala
-        .map(_.value())
-        .mkString(".")
-      if (optionName == "java_outer_classname") {
-        option.value() match {
-          case ident: Ident =>
-            val v = ident.value()
-            if (v.startsWith("\"") && v.endsWith("\""))
-              return v.substring(1, v.length - 1)
-            return v
-          case _ =>
-        }
-      }
-    }
-    // Generate from filename (convert snake_case to CamelCase).
-    // Match protoc behavior: use the filename-derived class name unless it
-    // collides with a top-level declaration, in which case append "OuterClass".
-    val filename = input.path.split('/').last.stripSuffix(".proto")
-    val candidate = snakeToCamel(filename)
-    val collidesWithTopLevel = file.declarations().asScala.exists {
-      case msg: MessageDecl => msg.name().value() == candidate
-      case enum: EnumDecl => enum.name().value() == candidate
-      case svc: ServiceDecl => svc.name().value() == candidate
-      case _ => false
-    }
-    if (collidesWithTopLevel) candidate + "OuterClass"
-    else candidate
-  }
-
-  private def getJavaMultipleFiles(file: ProtoFile): Boolean = {
-    file.options().asScala.foreach { option =>
-      val optionName = option
-        .name()
-        .asScala
-        .map(_.value())
-        .mkString(".")
-      if (optionName == "java_multiple_files") {
-        option.value() match {
-          case ident: Ident =>
-            return ident.value() == "true"
-          case _ =>
-        }
-      }
-    }
-    false
-  }
+  private def snakeToCamelLower(snakeCase: String): String =
+    ProtoNaming.snakeToLowerCamel(snakeCase)
 }
