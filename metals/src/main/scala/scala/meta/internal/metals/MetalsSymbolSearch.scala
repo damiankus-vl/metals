@@ -77,7 +77,16 @@ class MetalsSymbolSearch(
       result.isEmpty() &&
       userConfig().isMbtDefinitionProviderEnabled
     ) {
-      return mbt.definition(symbol).asJava
+      val mbtResult = mbt.definition(symbol)
+      if (mbtResult.nonEmpty) return mbtResult.asJava
+    }
+
+    // A proto-generated class has no source file of its own, so nothing above
+    // can place it. Without this the Scala compiler, which reads the outline
+    // off its source path, reports the symbol with no definition at all.
+    if (result.isEmpty()) {
+      val protoLocations = defn.protoDefinitionLocations(symbol)
+      if (protoLocations.nonEmpty) return protoLocations.asJava
     }
     result
   }

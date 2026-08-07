@@ -345,6 +345,7 @@ class CompilerConfiguration(
       referenceCounter: CompletionItemPriority,
       overrideSourcePathMode: SourcePathMode,
       additionalClasspath: Seq[Path] = Nil,
+      additionalSourcePath: Seq[Path] = Nil,
       additionalOptions: Seq[String] = Nil,
   ) extends LazyCompiler {
 
@@ -396,7 +397,8 @@ class CompilerConfiguration(
         name,
         search,
         referenceCounter,
-        srcFiles,
+        sourcePath =
+          () => (srcFiles.get().asScala ++ additionalSourcePath).asJava,
       )
         .withBuildTargetName(scalaTarget.displayName)
     }

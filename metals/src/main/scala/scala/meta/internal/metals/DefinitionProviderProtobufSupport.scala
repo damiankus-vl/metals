@@ -21,6 +21,8 @@ import scala.meta.internal.{semanticdb => s}
 import scala.meta.io.AbsolutePath
 
 import org.eclipse.lsp4j.Location
+import org.eclipse.lsp4j.Position
+import org.eclipse.lsp4j.Range
 
 final class DefinitionProviderProtobufSupport(
     workspace: AbsolutePath,
@@ -91,6 +93,40 @@ final class DefinitionProviderProtobufSupport(
       )
       result
   }
+
+  /**
+   * Where a proto-generated symbol is declared, for a compiler that reported
+   * it without a location of its own.
+   *
+   * The Java compiler is handed the synthesized outline as an in-memory source
+   * and answers with its virtual URI. The Scala one reads the outline off its
+   * source path, so it resolves the symbol but has no position to report; this
+   * supplies the same virtual URI and resolves it the same way.
+   *
+   * Empty when the symbol is not proto-generated, the common case: callers use
+   * this only once their own lookup came up empty.
+   */
+  def protoDefinitionLocations(symbol: String): List[Location] =
+    if (!protobufLspConfig().definition) Nil
+    else {
+      for {
+        outline <- mbt.protoJavaOutlineFor(Symbol(symbol)).toList
+        result <- handleProtoJavaDefinition(
+          DefinitionResult(
+            ju.List.of(new Location(outline.uri().toString(), emptyRange)),
+            symbol,
+            None,
+            None,
+            symbol,
+          )
+        ).toList
+        location <- result.locations.asScala
+      } yield location
+    }
+
+  /** The outline location is only ever read for its URI. */
+  private def emptyRange: Range =
+    new Range(new Position(0, 0), new Position(0, 0))
 
   def handleProtoJavaDefinition(
       res: DefinitionResult

@@ -140,6 +140,28 @@ class MbtWorkspaceSymbolProvider(
   def protoJavaOutlines(file: AbsolutePath): Seq[VirtualTextDocument] =
     documents.get(file).toSeq.flatMap(protobufWorkspace.allJavaOutlines)
 
+  /**
+   * The synthesized Java outline declaring `symbol`, for example
+   * `com/example/jproto/User#getName().`, matched on the toplevel class the
+   * outline declares.
+   *
+   * Lets navigation place a symbol the Scala compiler reported without a
+   * location, which is all it can report for a class it only ever read as a
+   * source-path outline.
+   */
+  def protoJavaOutlineFor(symbol: Symbol): Option[VirtualTextDocument] = {
+    val binaryName = symbol.toplevelBinaryName
+    val outlines = for {
+      protoPath <- documentsKeys.iterator.filter(_.isProtoFilename)
+      outline <- protoJavaOutlines(protoPath)
+      if outline
+        .toplevelSymbols()
+        .asScala
+        .exists(Symbol(_).toplevelBinaryName == binaryName)
+    } yield outline
+    outlines.nextOption()
+  }
+
   private val turbineCompiler: TurbineCompiler[AbsolutePath] =
     new TurbineCompiler[AbsolutePath](
       () => documentsKeys,
@@ -574,10 +596,58 @@ class MbtWorkspaceSymbolProvider(
   }
 
   override def listAllPackages(): ju.Map[String, ju.Set[Path]] = {
-    documentsByPackage
-      .mapValues(set => ju.Collections.unmodifiableSet(set))
-      .toMap
-      .asJava
+    val indexed = documentsByPackage.map { case (pkg, paths) =>
+      pkg -> paths.asScala.toSet
+    }.toMap
+    val merged = protoJavaOutlineSourcesByPackage().foldLeft(indexed) {
+      case (acc, (pkg, outlines)) =>
+        acc.updated(pkg, acc.getOrElse(pkg, Set.empty) ++ outlines)
+    }
+    merged.map { case (pkg, paths) =>
+      pkg -> ju.Collections.unmodifiableSet(paths.asJava)
+    }.asJava
+  }
+
+  /**
+   * The materialized proto Java outlines, for a Scala target's
+   * presentation-compiler source path. In the pruned source-path mode the
+   * compiler keeps an indexed file only when it is on the source path too, so
+   * these have to be declared in both places: here for eligibility, and in
+   * [[listAllPackages]] for the package they actually belong to.
+   */
+  def protoJavaOutlineSourcePaths(): Seq[Path] =
+    protoJavaOutlineSourcesByPackage().values.flatten.toSeq
+
+  /**
+   * Materialized proto Java outlines, keyed by the package they declare.
+   *
+   * This is the Scala counterpart to the Java compiler's SOURCE_PATH listing
+   * (see [[TurbineCompiler.listCombinedSourcepath]]): the Java compiler is
+   * handed the outlines as in-memory sources, but the Scala one only reads
+   * `listAllPackages`, and the index maps a proto package to the `.proto`
+   * file itself, which is not a source the Scala compiler can parse.
+   *
+   * The package here is the one the outline declares, so it is unrelated to
+   * where the file was materialized: callers key off the package symbol,
+   * not the directory layout.
+   */
+  private def protoJavaOutlineSourcesByPackage(): Map[String, Set[Path]] = {
+    if (!protobufWorkspace.isJavaPackageIndexingEnabled) Map.empty
+    else {
+      val outlines = for {
+        protoPath <- documentsKeys.iterator.filter(_.isProtoFilename).toSeq
+        outline <- protoJavaOutlines(protoPath)
+        className <- ProtoJavaVirtualFile
+          .extractClassName(outline.uri().toString())
+          .toSeq
+        javaFile <- ProtoGeneratedJavaFiles
+          .materialize(workspace, protoPath, className, outline.text)
+          .toSeq
+      } yield outline.pkg -> javaFile.toNIO
+      outlines.groupMap(_._1)(_._2).map { case (pkg, paths) =>
+        pkg -> paths.toSet
+      }
+    }
   }
 
   def document(file: AbsolutePath): Option[IndexedDocument] = {
