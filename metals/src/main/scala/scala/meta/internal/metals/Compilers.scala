@@ -643,6 +643,23 @@ class Compilers(
   }
 
   /**
+   * Evicts the Scala presentation compilers. The next request rebuilds them.
+   *
+   * A Scala compiler reads proto-generated classes from a source path fixed
+   * when it was built. `restart()` keeps that source path, so it would not see
+   * a proto change. The cache entry is dropped instead.
+   */
+  def restartScalaCompilers(): Unit = {
+    val scalaKeys = cache.keys.collect {
+      case key: PresentationCompilerKey.ScalaBuildTarget => key
+    }
+    for (key <- scalaKeys) {
+      scribe.debug(s"Restarting Scala compiler for $key")
+      Option(jcache.remove(key)).foreach(_.shutdown())
+    }
+  }
+
+  /**
    * Restart the PC for this target and all build targets that depend on it.
    *
    * This is necessary when the user makes code changes and downstream targets may
@@ -1856,6 +1873,8 @@ class Compilers(
 
       var newCompiler = false
 
+      evictCompilerWithStaleProtoOutlines(key)
+
       // in case of a restart, the presentation compiler should know all files that have been modified
       // and use their up to date contents when type checking
       val pc = jcache
@@ -1863,6 +1882,27 @@ class Compilers(
         .await
       Option(if (newCompiler) loadInitialFiles(pc) else pc)
     }
+
+  /**
+   * Drops a Scala compiler built with outlines a proto edit has since replaced.
+   *
+   * A save drops the compilers it can find in the cache. One still being built
+   * is not there yet, so it survives that. The version it recorded does not.
+   */
+  private def evictCompilerWithStaleProtoOutlines(
+      key: PresentationCompilerKey
+  ): Unit =
+    Option(jcache.get(key))
+      .collect {
+        case compiler: ScalaLazyCompiler
+            if compiler.protoOutlineVersion !=
+              mbtWorkspaceSymbolProvider.protoOutlineVersion() =>
+          compiler
+      }
+      .foreach { _ =>
+        scribe.debug(s"Dropping Scala compiler with stale proto outlines: $key")
+        Option(jcache.remove(key)).foreach(_.shutdown())
+      }
 
   private def withKeyAndDefault[T](
       targetId: BuildTargetIdentifier
@@ -1883,6 +1923,21 @@ class Compilers(
                 search,
                 completionItemPriority(),
                 serverConfig.compilers.sourcePathMode,
+                // The Java compiler gets these outlines on its SOURCE_PATH.
+                // The Scala compiler needs them too, or a proto-generated
+                // class does not resolve. Scala 2 reads them from memory.
+                // Scala 3 needs them written.
+                additionalSourcePath = () =>
+                  if (ScalaVersions.isScala3Version(scalaTarget.scalaVersion))
+                    mbtWorkspaceSymbolProvider
+                      .materializedProtoJavaOutlineSourcePaths()
+                  else
+                    mbtWorkspaceSymbolProvider.protoJavaOutlineSourcePaths(),
+                // Read here, before the compiler reads an outline. A proto
+                // edit in between leaves this behind and the compiler is
+                // dropped unused, which is the safe way round.
+                protoOutlineVersion =
+                  mbtWorkspaceSymbolProvider.protoOutlineVersion(),
               )
             }
           val key =

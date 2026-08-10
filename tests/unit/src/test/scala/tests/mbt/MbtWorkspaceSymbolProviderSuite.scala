@@ -197,6 +197,48 @@ module com.example {
     assertEquals(provider.allFiles(), Nil)
   }
 
+  // A Scala compiler holds the outlines it was built with. It records this
+  // version first, and `Compilers` drops it once the version has moved on. A
+  // save that generates the same code has to leave the version alone, or every
+  // save on a `.proto` rebuilds the compilers.
+  test("proto-outline-version") {
+    def layout(message: String, comment: String): String =
+      s"""|/com/User.proto
+          |syntax = "proto3";
+          |package com.example.api;
+          |option java_package = "com.example.api.jproto";
+          |option java_multiple_files = true;
+          |$comment
+          |message $message {
+          |  string name = 1;
+          |}
+          |""".stripMargin
+    FileLayout.fromString(layout("User", ""), root = workspace())
+    val provider = new MbtWorkspaceSymbolProvider(
+      workspace(),
+      config = () => Configs.WorkspaceSymbolProviderConfig.mbt,
+      protobufLspConfig = () => Configs.ProtobufLspConfig.enabled,
+    )(munitExecutionContext)
+    workspace.executeCommand("git init -b main")
+    workspace.gitCommitAllChanges()
+    provider.onReindex().awaitBackgroundJobs()
+
+    val proto = workspace().resolve("com/User.proto")
+    // Serving the outlines to a compiler is what records them.
+    assert(clue(provider.protoJavaOutlineSourcePaths()).nonEmpty)
+    val served = provider.protoOutlineVersion()
+
+    // A comment generates the same Java.
+    FileLayout.fromString(layout("User", "// Someone."), root = workspace())
+    assertEquals(provider.didSave(proto), false)
+    assertEquals(provider.protoOutlineVersion(), served)
+
+    // A renamed message does not.
+    FileLayout.fromString(layout("Customer", ""), root = workspace())
+    assertEquals(provider.didSave(proto), true)
+    assertEquals(provider.protoOutlineVersion(), served + 1)
+  }
+
   def manuallyTestWorkspace(
       dir: TestOptions,
       query: String,

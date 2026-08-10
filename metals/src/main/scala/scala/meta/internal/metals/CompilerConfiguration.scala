@@ -345,6 +345,14 @@ class CompilerConfiguration(
       referenceCounter: CompletionItemPriority,
       overrideSourcePathMode: SourcePathMode,
       additionalClasspath: Seq[Path] = Nil,
+      // A thunk, evaluated when the compiler is built. The compiler reads
+      // `SemanticdbFileManager#inMemorySourceFiles` at the same point. The two
+      // have to name the same outlines.
+      additionalSourcePath: () => Seq[Path] = () => Nil,
+      // What `MbtWorkspaceSymbolProvider#protoOutlineVersion` read before this
+      // compiler was given any outlines. `Compilers` drops the compiler once
+      // the provider has moved past it.
+      protoOutlineVersion: Long = 0,
       additionalOptions: Seq[String] = Nil,
   ) extends LazyCompiler {
 
@@ -396,7 +404,8 @@ class CompilerConfiguration(
         name,
         search,
         referenceCounter,
-        srcFiles,
+        sourcePath =
+          () => (srcFiles.get().asScala ++ additionalSourcePath()).asJava,
       )
         .withBuildTargetName(scalaTarget.displayName)
     }

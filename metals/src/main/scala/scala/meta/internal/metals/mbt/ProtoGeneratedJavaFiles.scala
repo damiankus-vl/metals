@@ -2,6 +2,8 @@ package scala.meta.internal.metals.mbt
 
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.file.attribute.FileTime
 
 import scala.util.control.NonFatal
 
@@ -11,13 +13,33 @@ import scala.meta.internal.mtags.MD5
 import scala.meta.io.AbsolutePath
 
 /**
- * Materializes the Java source that Metals synthesizes from a `.proto` file
- * (via [[MbtProtobufWorkspaceSymbolProvider]]) into a read-only file on disk,
- * so that goto-definition on a proto-generated class can open it.
+ * A synthesized outline as a source file.
  *
- * The outline is derived purely from the `.proto` file, so this needs no build
- * output and no configuration and works for every build tool. Files live under
+ * `packageSymbol` is the package the outline declares, `com/example/jproto/`.
+ * `file` is where the outline would be written,
+ * `.metals/readonly/dependencies/proto-generated/a/model.proto/User.java`. The
+ * path does not encode the package. It names the outline even when no file has
+ * been written.
+ */
+final case class ProtoOutlineFile(
+    packageSymbol: String,
+    file: Path,
+    text: String,
+)
+
+/**
+ * Materializes the Java source that Metals synthesizes from a `.proto` file
+ * (via [[MbtProtobufWorkspaceSymbolProvider]]) into a read-only file on disk.
+ *
+ * Two callers need a real file. Goto-definition needs one for the editor to
+ * open. The Scala 3 compiler needs one because it cannot read the text from
+ * memory, unlike Scala 2. A file on disk does not mean the user navigated to
+ * it.
+ *
+ * The outline comes from the `.proto` alone. This needs no build output and no
+ * configuration, and works for any build tool. Files live under
  * `.metals/readonly/` so clients treat them as read-only dependency sources.
+ * They are dated 1970 so a compiled class of the same name still wins.
  */
 object ProtoGeneratedJavaFiles {
 
@@ -39,12 +61,7 @@ object ProtoGeneratedJavaFiles {
       content: String,
   ): Option[AbsolutePath] =
     try {
-      protoPath.toRelativeInside(workspace).map { protoRelative =>
-        val javaFile = workspace
-          .resolve(Directories.dependencies)
-          .resolve(rootDirName)
-          .resolveZipPath(protoRelative.toNIO)
-          .resolve(s"$className.java")
+      pathFor(workspace, protoPath, className).map { javaFile =>
         writeIfChanged(javaFile, content)
         javaFile
       }
@@ -55,6 +72,41 @@ object ProtoGeneratedJavaFiles {
           e,
         )
         None
+    }
+
+  /**
+   * Writes `outline` to the path it already names, for a compiler that can
+   * only read a source from disk. No-op when the file is already that text.
+   */
+  def materialize(outline: ProtoOutlineFile): Unit =
+    try writeIfChanged(AbsolutePath(outline.file), outline.text)
+    catch {
+      case NonFatal(e) =>
+        scribe.debug(
+          s"proto-java: failed to materialize ${outline.file}",
+          e,
+        )
+    }
+
+  /**
+   * Where [[materialize]] would write `className.java`, without writing it.
+   *
+   * Derived from the proto alone, so it names an outline whether or not one is
+   * on disk. A compiler that was handed the text from memory reports positions
+   * against this path. For Scala 2 a file appears only when the user navigates
+   * to it. For Scala 3 it is written when the compiler is built.
+   */
+  def pathFor(
+      workspace: AbsolutePath,
+      protoPath: AbsolutePath,
+      className: String,
+  ): Option[AbsolutePath] =
+    protoPath.toRelativeInside(workspace).map { protoRelative =>
+      workspace
+        .resolve(Directories.dependencies)
+        .resolve(rootDirName)
+        .resolveZipPath(protoRelative.toNIO)
+        .resolve(s"$className.java")
     }
 
   /**
@@ -115,6 +167,12 @@ object ProtoGeneratedJavaFiles {
     if (changed) {
       Files.createDirectories(file.toNIO.getParent)
       Files.write(file.toNIO, content.getBytes(StandardCharsets.UTF_8))
+      // A compiler prefers a compiled class over a source of the same name
+      // when `src.lastModified >= bin.lastModified`. Dating the outline 1970
+      // makes the compiled class win. It carries more than Metals could infer
+      // from the `.proto`. Scala 2 reaches the same result with a virtual
+      // file. Its `lastModified` is 0.
+      Files.setLastModifiedTime(file.toNIO, FileTime.fromMillis(0))
     }
   }
 }

@@ -98,7 +98,17 @@ final class MbtProtobufWorkspaceSymbolProvider(
    * All Java outlines generated from the given proto document, regardless of
    * package.
    */
-  def allJavaOutlines(doc: IndexedDocument): Seq[VirtualTextDocument] = {
+  def allJavaOutlines(doc: IndexedDocument): Seq[VirtualTextDocument] =
+    generatedJavaOutlines(doc).documents
+
+  /**
+   * Digests of the outlines [[allJavaOutlines]] returns, for a consumer that
+   * only needs to know whether a save changed them.
+   */
+  def javaOutlineDigests(doc: IndexedDocument): Map[String, String] =
+    generatedJavaOutlines(doc).digests
+
+  private def generatedJavaOutlines(doc: IndexedDocument): ProtoJavaOutlines = {
     doc.getOrComputeJavaOutlines(() =>
       try {
         val input = doc.file.toInputFromBuffers(buffers)
