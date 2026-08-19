@@ -46,9 +46,20 @@ class TurbineCache(
     cacheConfig: () => TurbineCacheConfig,
     recompileDelayConfig: () => TurbineRecompileDelayConfig,
     time: Time,
+    /**
+     * What the cache is keyed by, the git HEAD of the workspace. Empty outside a
+     * repository, which is when there is nothing to invalidate the cache against.
+     */
+    headHash: () => Option[String],
 ) {
   private val cachePath = workspace.resolve(Directories.turbineCache)
   private val CacheKeyEntry = "META-INF/turbine-cache-key"
+
+  /**
+   * Which source the cached types were declared by. The classfiles do not say, and a
+   * deletion in a session that started from the cache has nothing else to go on.
+   */
+  private val DeclaredTypesEntry = "META-INF/turbine-declared-types"
 
   // we need to always compile on start
   private def isCacheEnabled: Boolean = {
@@ -61,17 +72,17 @@ class TurbineCache(
    * Writes the Turbine compilation result to the cache file.
    * Uses the current git hash as the cache key.
    *
-   * @param result The compilation result to cache
+   * @param compiled The compilation result to cache
    */
-  def writeCache(result: TurbineCompileResult): Unit =
+  def writeCache(compiled: TurbineCompileResult): Unit =
     if (isCacheEnabled) {
       val timer = new Timer(time)
       try {
-        val bytes = result.lowered.bytes()
+        val bytes = compiled.lowered.bytes()
         if (bytes.isEmpty()) {
           scribe.debug("turbine-cache: skipping write, no classes to cache")
         } else {
-          GitVCS.getHeadHash(workspace) match {
+          headHash() match {
             case Some(gitHash) =>
               cachePath.parent.createDirectories()
               Using.resource(
@@ -91,13 +102,18 @@ class TurbineCache(
                   CacheKeyEntry,
                   gitHash.getBytes(StandardCharsets.UTF_8),
                 )
+                addEntry(
+                  jos,
+                  DeclaredTypesEntry,
+                  DeclaredTypesCodec.toBytes(compiled.declaredTypes),
+                )
                 bytes.forEach { (binaryName, classBytes) =>
                   addEntry(jos, binaryName + ".class", classBytes)
                 }
               }
 
               scribe.info(
-                s"turbine-cache: wrote ${result.lowered.symbols().size()} classes in ${timer.elapsedMillis}ms (git: ${gitHash.take(8)})"
+                s"turbine-cache: wrote ${compiled.lowered.symbols().size()} classes in ${timer.elapsedMillis}ms (git: ${gitHash.take(8)})"
               )
             case None =>
               scribe.debug(
@@ -119,7 +135,7 @@ class TurbineCache(
    * @return The cached result, or None if cache doesn't exist, is invalid, or git hash mismatches
    */
   def readCache(classpath: Seq[Path]): Option[TurbineCompileResult] = {
-    lazy val expectedHash = GitVCS.getHeadHash(workspace)
+    lazy val expectedHash = headHash()
     if (!isCacheEnabled) {
       scribe.debug("turbine-cache: caching is disabled")
       None
@@ -135,12 +151,15 @@ class TurbineCache(
         val bytesBuilder = ImmutableMap.builder[String, Array[Byte]]()
         val symbolsBuilder = ImmutableSet.builder[ClassSymbol]()
         var storedHash: Option[String] = None
+        var declaredTypes = DeclaredTypes.empty
         Using.resource(new Zip.ZipIterable(cachePath.toNIO)) { zipIterable =>
           zipIterable.forEach { entry =>
             val name = entry.name()
             if (name == CacheKeyEntry) {
               storedHash =
                 Some(new String(entry.data(), StandardCharsets.UTF_8))
+            } else if (name == DeclaredTypesEntry) {
+              declaredTypes = DeclaredTypesCodec.fromBytes(entry.data())
             } else if (name.endsWith(".class")) {
               val binaryName = name.stripSuffix(".class")
               val sym = new ClassSymbol(binaryName)
@@ -160,7 +179,8 @@ class TurbineCache(
             // Bind the project classpath (libraries) so dependency symbols remain
             // discoverable when serving classes from the cached lowered output.
             val classPath = ClassPathBinder.bindClasspath(classpath.asJava)
-            val result = TurbineCompileResult(classPath, lowered)
+            val result =
+              TurbineCompileResult(classPath, lowered, declaredTypes)
 
             scribe.info(
               s"turbine-cache: loaded ${lowered.symbols().size()} classes in ${timer.elapsedMillis}ms (git: ${expectedHash.get.take(8)})"

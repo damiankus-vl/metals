@@ -149,6 +149,7 @@ class MbtWorkspaceSymbolProvider(
     turbineCacheConfig,
     turbineRecompileDelay,
     time,
+    headHash = () => GitVCS.getHeadHash(workspace),
   )
 
   /**
@@ -224,6 +225,10 @@ class MbtWorkspaceSymbolProvider(
         } else {
           Nil
         },
+      // A proto parses to an outline per generated toplevel class, and they answer to
+      // the proto, so deleting it takes the classes they declared. The path rather than
+      // the URI, since this runs for every input of every compilation.
+      sourcePath = file => file.toString,
       () => fallbackClasspaths().javaCompilerClasspath(),
       progress,
       // We don't need to re-compile the workspace super regularly because we can
@@ -262,7 +267,7 @@ class MbtWorkspaceSymbolProvider(
   def didSave(path: AbsolutePath): Unit = {
     if (path.isProtoFilename) {
       documents.get(path).foreach { doc =>
-        invalidateCompiledProtoJavaOutlines(path, doc)
+        invalidateCompiledProtoJavaOutlines(path)
         doc.clearProtobufJavaOutlinesCache()
       }
     }
@@ -276,15 +281,15 @@ class MbtWorkspaceSymbolProvider(
    * stale classfiles until the next turbine recompile.
    */
   private def invalidateCompiledProtoJavaOutlines(
-      file: AbsolutePath,
-      doc: IndexedDocument,
+      file: AbsolutePath
   ): Unit = {
     if (javaSymbolLoader().isTurbineClasspath) {
-      val binaryNames = doc.cachedJavaOutlines
-        .flatMap(_.toplevelSymbols().asScala)
-        .map(_.stripSuffix("#").stripSuffix("."))
-      if (binaryNames.nonEmpty) {
-        turbineCompiler.onDidDelete(binaryNames, file.toURI.toString())
+      // Turbine compiled the outlines, not the proto file, so their classes are what
+      // has to be invalidated: `User`, `UserOrBuilder` and `User$Builder`. It
+      // recorded them all under the proto, so the proto is what to ask about.
+      val invalidated =
+        turbineCompiler.onDidDelete(file.toString, file.toURI.toString())
+      if (invalidated.nonEmpty) {
         turbineCompiler.scheduleCompile().ignoreValue
       }
     }
@@ -505,13 +510,9 @@ class MbtWorkspaceSymbolProvider(
         // This adds an empty source to SOURCE_PATH so javac won't find the class.
         // We also track deleted binary names to exclude from CLASS_PATH.
         if (doc.language.isJava && javaSymbolLoader().isTurbineClasspath) {
-          val binaryNames = doc.symbols
-            .map(_.getSymbol())
-            .filter(sym => Symbol(sym).isToplevel)
-            .map(sym => sym.stripSuffix("#").stripSuffix("."))
-            .toSeq
-          // Track deleted binary names for CLASS_PATH exclusion
-          turbineCompiler.onDidDelete(binaryNames, file.toURI.toString())
+          // Secondary toplevel classes and nested ones go too, not only the class the
+          // file is named after. The compilation recorded them under this file.
+          turbineCompiler.onDidDelete(file.toString, file.toURI.toString())
           // Add empty file to SOURCE_PATH so javac parses it and doesn't find the class
           doc.semanticdbPackages.headOption match {
             case Some(pkg) =>
@@ -530,7 +531,7 @@ class MbtWorkspaceSymbolProvider(
               Future.unit
           }
         } else if (doc.language.isProtobuf) {
-          invalidateCompiledProtoJavaOutlines(file, doc)
+          invalidateCompiledProtoJavaOutlines(file)
           Future.unit
         } else {
           Future.unit
@@ -1049,7 +1050,7 @@ class MbtWorkspaceSymbolProvider(
         // Covers proto files changed outside the editor (e.g. git checkout);
         // for editor saves, didSave already invalidated before the outline
         // cache was cleared.
-        old.foreach(invalidateCompiledProtoJavaOutlines(file, _))
+        invalidateCompiledProtoJavaOutlines(file)
         Future.unit
       } else {
         Future.unit

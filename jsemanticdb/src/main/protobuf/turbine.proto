@@ -1,0 +1,27 @@
+// This file contains definitions for what Metals persists about a Turbine compilation.
+// These go into .metals/turbine-cache.jar beside the classfiles that compilation
+// produced, which is a different file from the index described by mbt.proto.
+syntax = "proto3";
+
+package scala.meta.internal.turbine;
+
+option java_package = "scala.meta.internal.jturbine";
+
+// The types Turbine compiled, under the source it read them from. Classes, interfaces,
+// enums, records and annotation types alike, since the JVM loads a classfile for each
+// and CLASS_PATH lists them all the same way.
+//
+// The classfiles do not themselves say which source declared them, so without this a
+// session starting from the cache cannot hide the types of a file deleted before its
+// first compilation.
+message DeclaredTypes {
+  message Source {
+    // The path of the file the types were compiled from. A `.proto` holds the types of
+    // every outline generated from it, since deleting it takes them together.
+    string path = 1;
+    // `/` between the package parts and `$` between the nesting levels, the form
+    // Turbine lists its output under: `com/example/User$Builder`.
+    repeated string type_name = 2;
+  }
+  repeated Source sources = 1;
+}

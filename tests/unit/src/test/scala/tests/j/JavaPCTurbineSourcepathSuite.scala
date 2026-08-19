@@ -4,6 +4,9 @@ import java.nio.file.Files
 
 import scala.meta.internal.metals.Configs.JavaSymbolLoaderConfig
 import scala.meta.internal.metals.Configs.TurbineRecompileDelayConfig
+import scala.meta.internal.metals.MetalsEnrichments._
+
+import org.eclipse.lsp4j.FileChangeType
 
 /**
  * Tests that specifically stress the SOURCE_PATH fallback mode in turbine-classpath.
@@ -131,7 +134,7 @@ class JavaPCTurbineSourcepathSuite
       )
       _ <- server.didChangeWatchedFiles(
         helper.toURI.toString(),
-        org.eclipse.lsp4j.FileChangeType.Created,
+        FileChangeType.Created,
       )
       _ <- server.didOpen(helper.toURI.toString)
 
@@ -204,6 +207,93 @@ class JavaPCTurbineSourcepathSuite
         )
       )
       _ = assertNoDiagnostics()
+    } yield ()
+  }
+
+  // Recompilation is disabled here, so Turbine's output keeps these classes after
+  // the source is deleted. The classfiles stay on CLASS_PATH and only the hidden
+  // binary names keep javac from resolving them. Suites on the 100ms delay recompile
+  // before asserting, which drops the classes anyway.
+  //
+  // `Models.java` declares two toplevel classes with a nested one in each, so a
+  // secondary toplevel class and the nested ones have to go too.
+  test("delete-hides-every-class-the-file-compiled-to") {
+    cleanWorkspace()
+    for {
+      _ <- initialize(
+        """|
+           |/metals.json
+           |{
+           |  "a": {}
+           |}
+           |/a/src/main/java/a/Models.java
+           |package a;
+           |
+           |public class Models {
+           |  public static class Inner {}
+           |}
+           |class Helper {
+           |  static class Nested {}
+           |}
+           |/a/src/main/java/a/Main.java
+           |package a;
+           |
+           |public class Main {
+           |  public void models(Models models) {}
+           |  public void inner(Models.Inner inner) {}
+           |  public void helper(Helper helper) {}
+           |  public void nested(Helper.Nested nested) {}
+           |}
+           |""".stripMargin
+      )
+      _ <- server.didOpen("a/src/main/java/a/Main.java")
+      // Every class resolves from Turbine's compiled output.
+      _ = assertNoDiagnostics()
+
+      // Delete on disk, as a file watcher would report it.
+      models = workspace.resolve("a/src/main/java/a/Models.java")
+      _ = models.delete()
+      _ <- server.didChangeWatchedFiles(
+        models.toURI.toString(),
+        FileChangeType.Deleted,
+      )
+
+      // Re-run javac on the file that uses them. The trailing comment is what
+      // makes the content differ; an identical didChange recompiles nothing and
+      // the assertion below would pass on stale output.
+      _ <- server.didChange("a/src/main/java/a/Main.java") { _ =>
+        """|package a;
+           |
+           |public class Main {
+           |  public void models(Models models) {}
+           |  public void inner(Models.Inner inner) {}
+           |  public void helper(Helper helper) {}
+           |  public void nested(Helper.Nested nested) {}
+           |}
+           |// touched
+           |""".stripMargin
+      }
+
+      _ = assertNoDiff(
+        client.workspaceDiagnostics,
+        """|a/src/main/java/a/Main.java:4:22: error: cannot find symbol
+           |  symbol:   class Models
+           |  location: class a.Main
+           |  public void models(Models models) {}
+           |                     ^^^^^^
+           |a/src/main/java/a/Main.java:5:27: error: package Models does not exist
+           |  public void inner(Models.Inner inner) {}
+           |                          ^^^^^^
+           |a/src/main/java/a/Main.java:6:22: error: cannot find symbol
+           |  symbol:   class Helper
+           |  location: class a.Main
+           |  public void helper(Helper helper) {}
+           |                     ^^^^^^
+           |a/src/main/java/a/Main.java:7:28: error: package Helper does not exist
+           |  public void nested(Helper.Nested nested) {}
+           |                           ^^^^^^^
+           |""".stripMargin,
+      )
     } yield ()
   }
 }

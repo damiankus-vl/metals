@@ -44,19 +44,29 @@ object TurbineCompiler {
   val emptyResult: TurbineCompileResult = TurbineCompileResult(
     ClassPathBinder.bindClasspath(List.empty.asJava),
     Lower.Lowered.create(ImmutableMap.of(), ImmutableSet.of()),
+    DeclaredTypes.empty,
   )
 
+  /**
+   * Compiles the inputs, and reports the types they produced under the path of the
+   * input they came from.
+   *
+   * Turbine says which source declared what, so the sources are not read a second
+   * time and the names are the ones its output is served under. They cannot be spelled
+   * differently from it.
+   */
   def compileClassfiles[T](
       toParse: ParArray[T],
       toSourceFile: T => Seq[SourceFile],
+      sourcePath: T => String,
       classpath: Seq[Path],
       progressBars: ProgressBars,
   )(implicit rc: ReportContext): TurbineCompileResult = {
     val bar =
       progressBars.start(new ProgressBars.StartProgressBarParams("Outlining"))
     try {
-      val units = parseInputs(toParse, toSourceFile)
-      compileClassfilesInternal(units, classpath)
+      val parsed = parseInputs(toParse, toSourceFile, sourcePath)
+      compileClassfilesInternal(parsed, classpath)
     } catch {
       case NonFatal(e) =>
         PcQueryContext(None, () => classpath.mkString("\n"))
@@ -67,27 +77,47 @@ object TurbineCompiler {
     }
   }
 
+  /**
+   * The parsed sources, and the path of the input a source came from.
+   *
+   * One input can produce several sources. A `.proto` contributes an outline per
+   * generated toplevel class, and the types of those outlines go together when it is
+   * deleted, so they answer to the proto's path.
+   */
+  private final case class ParsedInputs(
+      compilationUnits: ImmutableList[Tree.CompUnit],
+      parsedPathToSourcePath: Map[String, String],
+  )
+
   private def parseInputs[T](
       inputs: ParArray[T],
       toSourceFile: T => Seq[SourceFile],
-  ): ImmutableList[Tree.CompUnit] = {
-    val result = new ConcurrentLinkedQueue[Tree.CompUnit]()
+      sourcePath: T => String,
+  ): ParsedInputs = {
+    val compilationUnits = new ConcurrentLinkedQueue[Tree.CompUnit]()
+    val parsedPathToSourcePath =
+      new ju.concurrent.ConcurrentHashMap[String, String]()
     inputs.foreach { input =>
       try {
         // An empty result means the entry doesn't exist or isn't Java-related.
         toSourceFile(input).foreach { source =>
-          result.add(Parser.parse(source))
+          compilationUnits.add(Parser.parse(source))
+          parsedPathToSourcePath.put(source.path(), sourcePath(input))
         }
       } catch {
         case NonFatal(_) =>
         // Silently ignore parse errors, they're very noisy
       }
     }
-    ImmutableList.copyOf(result)
+    // Snapshot rather than hand out `asScala`, which is a view of the mutable map.
+    ParsedInputs(
+      ImmutableList.copyOf(compilationUnits),
+      parsedPathToSourcePath.asScala.toMap,
+    )
   }
 
   private def compileClassfilesInternal(
-      units: ImmutableList[Tree.CompUnit],
+      parsed: ParsedInputs,
       classpath: Seq[Path],
   ): TurbineCompileResult = {
     val log = new TurbineLog()
@@ -95,19 +125,43 @@ object TurbineCompiler {
       ClassPathBinder.bindClasspath(validClasspaths(classpath).asJava)
     val result = Binder.bind(
       log,
-      units,
+      parsed.compilationUnits,
       boundClasspath,
       Processing.ProcessorInfo.empty(),
       JimageClassBinder.bindDefault(),
       Optional.empty(),
     )
+    // `units` holds a bound class per type the sources declare, nested ones included,
+    // and a bound class names the source it was read from.
+    //
+    // Grouped by the input's path rather than by the parsed source's own path, since
+    // several sources can share an input. A `.proto` parses to an outline per generated
+    // toplevel class, and grouping by the parsed path would leave the proto holding
+    // whichever outline came last.
+    val sourcePathToTypes = result
+      .units()
+      .asScala
+      .toSeq
+      .flatMap { case (symbol, bound) =>
+        parsed.parsedPathToSourcePath
+          .get(bound.source().path())
+          .map(_ -> symbol.binaryName())
+      }
+      .groupMap { case (sourcePath, _) => sourcePath } { case (_, typeName) =>
+        typeName
+      }
+      .map { case (sourcePath, typeNames) => sourcePath -> typeNames.toSet }
     val lowered = Lower.lowerAll(
       Lower.LowerOptions.createDefault(),
       result.units(),
       result.modules(),
       result.classPathEnv(),
     )
-    TurbineCompileResult(boundClasspath, lowered)
+    TurbineCompileResult(
+      boundClasspath,
+      lowered,
+      DeclaredTypes(sourcePathToTypes),
+    )
   }
   private[mbt] def validClasspaths(classpath: Seq[Path]): Seq[Path] = {
     classpath.filter(isJarFile)
@@ -127,6 +181,15 @@ private case class SourcepathJavaFileObject(
 class TurbineCompiler[T](
     allCompilationUnits: () => ParArray[T],
     parseUnit: T => Seq[SourceFile],
+    /**
+     * The path a compilation records an input's types under, and what [[onDidDelete]]
+     * looks them up by. An input that parses to several sources records them together
+     * under this one path.
+     *
+     * A path rather than a URI because this runs for every input of every compilation,
+     * and building a file URI stats the path to decide on a trailing slash.
+     */
+    sourcePath: T => String,
     classpath: () => Seq[Path],
     progressBars: ProgressBars,
     turbineRecompileDelay: () => TurbineRecompileDelayConfig,
@@ -147,6 +210,7 @@ class TurbineCompiler[T](
   private val deletedBinaryNames = ju.Collections.newSetFromMap(
     new ju.concurrent.ConcurrentHashMap[String, java.lang.Boolean]()
   )
+
   private def sourcepathSources(): Seq[SourcepathJavaFileObject] = {
     for {
       (_, deque) <- sourcepathByPackageName.iterator
@@ -186,23 +250,22 @@ class TurbineCompiler[T](
     )
   }
 
-  var result = TurbineCompiler.emptyResult
+  @volatile var result = TurbineCompiler.emptyResult
 
   /**
-   * Attempts to load compilation results from cache.
-   * Should be called during initialization before any compilation.
-   *
-   * @return true if cache was loaded successfully, false otherwise
+   * The output a previous session cached, with the types it recorded under their
+   * source. Empty when caching is off, when no cache matches the current git hash, or
+   * when reading it failed.
    */
   def loadFromCache(classpathPaths: Seq[Path]): Option[TurbineCompileResult] = {
     turbineCache match {
       case Some(cache) =>
         cache.readCache(classpathPaths) match {
-          case Some(cachedResult) =>
+          case Some(cached) =>
             scribe.info(
-              s"Loaded turbine cache with ${cachedResult.lowered.symbols().size()} symbols"
+              s"Loaded turbine cache with ${cached.lowered.symbols().size()} symbols"
             )
-            Some(cachedResult)
+            Some(cached)
           case None =>
             None
         }
@@ -214,23 +277,25 @@ class TurbineCompiler[T](
   def doCompileNow(): TurbineCompileResult = {
 
     def compile() = {
-      result = TurbineCompiler.compileClassfiles(
+      val compiled = TurbineCompiler.compileClassfiles(
         allCompilationUnits(),
         parseUnit,
+        sourcePath,
         classpath(),
         progressBars,
       )
+      result = compiled
       cleanup()
       // Clear deleted binary names after recompile - they are no longer in the compiled output
       deletedBinaryNames.clear()
       // Write to cache after successful compilation
-      turbineCache.foreach(_.writeCache(result))
+      turbineCache.foreach(_.writeCache(compiled))
     }
 
     if (isFirstCompile.getAndSet(false)) {
       loadFromCache(TurbineCompiler.validClasspaths(classpath())) match {
-        case Some(cachedResult) =>
-          result = cachedResult
+        case Some(cached) =>
+          result = cached
           // Add dirty files to sourcepath so they take precedence over cached classes
           addDirtyFilesToSourcepath()
         case None =>
@@ -244,15 +309,21 @@ class TurbineCompiler[T](
   }
 
   /**
-   * Called when a file is deleted. Tracks the binary names of the deleted classes
-   * so they can be excluded from CLASS_PATH listing until the next turbine recompile.
-   * Also soft-deletes the file from the sourcepath so it's not returned via SOURCE_PATH.
+   * Hides from CLASS_PATH the types the last compilation produced for a file, until
+   * a recompile rebuilds the output without them, and soft-deletes the file from the
+   * sourcepath so SOURCE_PATH stops returning it.
    *
-   * @param binaryNames The binary names of classes defined in the deleted file
-   * @param fileUri The URI of the deleted file (used to soft-delete from sourcepath)
+   * Called for a deleted file, and for a changed one. A `.proto` that stopped declaring
+   * a message leaves that message's types in the output just as a deletion does, so
+   * what gets hidden is what the *previous* content compiled to.
+   *
+   * @param sourcePath the deleted file, as the compilation recorded its types under
+   * @param fileUri the same file as a URI, which is what the sourcepath entries carry
+   * @return the types now hidden, empty when no compilation has read this file
    */
-  def onDidDelete(binaryNames: Seq[String], fileUri: String): Unit = {
-    binaryNames.foreach(deletedBinaryNames.add)
+  def onDidDelete(sourcePath: String, fileUri: String): Set[String] = {
+    val compiledFromFile = result.declaredTypes.forSource(sourcePath)
+    compiledFromFile.foreach(deletedBinaryNames.add)
     // Soft-delete from sourcepath so the deleted file isn't returned via SOURCE_PATH
     sourcepathByPackageName.valuesIterator.foreach { deque =>
       deque.asScala.foreach { obj =>
@@ -261,6 +332,7 @@ class TurbineCompiler[T](
         }
       }
     }
+    compiledFromFile
   }
 
   /**

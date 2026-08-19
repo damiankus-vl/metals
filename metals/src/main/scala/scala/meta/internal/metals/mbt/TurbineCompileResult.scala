@@ -12,9 +12,18 @@ import com.google.turbine.binder.ClassPath
 import com.google.turbine.binder.sym.ClassSymbol
 import com.google.turbine.lower.Lower
 
+/**
+ * What one Turbine compilation produced: the output it built, and which source the
+ * types in that output came from.
+ *
+ * The attribution belongs here rather than beside it, since it is only meaningful for
+ * this output. Names recorded by one compilation say nothing about the types another
+ * one's output is listed under.
+ */
 case class TurbineCompileResult(
     classpath: ClassPath,
     lowered: Lower.Lowered,
+    declaredTypes: DeclaredTypes,
 ) {
   val symbolsByPackage: collection.Map[String, ArrayList[ClassSymbol]] = {
     val x = new HashMap[String, ArrayList[ClassSymbol]]()
