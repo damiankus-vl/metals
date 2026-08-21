@@ -788,8 +788,8 @@ class MbtWorkspaceSymbolProvider(
   }
 
   /**
-   * The proto Java outlines, for a Scala target's presentation-compiler source
-   * path. Nothing is written. The compiler is handed the text through
+   * The proto Java outlines, for a Scala 2 target's presentation-compiler
+   * source path. Nothing is written. The compiler is handed the text through
    * [[inMemorySourceFiles]].
    *
    * Pruned source-path mode keeps an indexed file only when the source path
@@ -797,6 +797,20 @@ class MbtWorkspaceSymbolProvider(
    */
   def protoJavaOutlineSourcePaths(): Seq[Path] =
     protoJavaOutlineFiles().map(_.file)
+
+  /**
+   * The proto Java outlines, for a Scala 3 target's presentation-compiler
+   * source path, written to disk first.
+   *
+   * Scala 3 resolves a source path entry with `AbstractFile.getFile`, and that
+   * answers null for a path with no file on it. It cannot be handed
+   * [[inMemorySourceFiles]] the way Scala 2 is.
+   */
+  def materializedProtoJavaOutlineSourcePaths(): Seq[Path] = {
+    val outlines = protoJavaOutlineFiles()
+    outlines.foreach(ProtoGeneratedJavaFiles.materialize)
+    outlines.map(_.file)
+  }
 
   /**
    * The synthesized outlines, so a Scala compiler can read them without a file
@@ -816,9 +830,10 @@ class MbtWorkspaceSymbolProvider(
    * index maps a package to `model.proto` itself. Scalac cannot parse a
    * `.proto`.
    *
-   * A path names an outline whether or not a file is on it. The compiler is
-   * handed the text through [[inMemorySourceFiles]], so nothing is written
-   * until navigation sends the client to a file.
+   * A path names an outline whether or not a file is on it. Scala 2 is handed
+   * the text through [[inMemorySourceFiles]] and writes nothing until
+   * navigation sends the client to a file. Scala 3 cannot read a source that
+   * way, so [[materializedProtoJavaOutlineSourcePaths]] writes them for it.
    */
   private def protoJavaOutlineFiles(): Seq[ProtoOutlineFile] =
     protoDocumentsKeys.flatMap(protoJavaOutlineFilesOf)

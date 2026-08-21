@@ -21,7 +21,9 @@ public interface SemanticdbFileManager {
    *
    * <p>The Scala 2 presentation compiler reads this once, when it is built, so
    * it matches the package listing from the same moment. The Java presentation
-   * compiler is served the same text through its own file manager.
+   * compiler is served the same text through its own file manager. Scala 3
+   * reads {@link #listAllPackages()} but not this, so its outlines are written
+   * to disk.
    */
   default Map<Path, String> inMemorySourceFiles() {
     return Collections.emptyMap();

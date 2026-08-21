@@ -45,4 +45,5 @@ final class InMemorySourceFile(
   // `JavaPlatform.needCompile` picks a compiled class over a source when
   // `src.lastModified >= bin.lastModified`. Dated 1970 this stand-in loses.
   // A compiled class carries more than Metals could infer from the `.proto`.
+  // A materialized outline is stamped with the same 0.
 }

@@ -1925,10 +1925,14 @@ class Compilers(
                 serverConfig.compilers.sourcePathMode,
                 // The Java compiler gets these outlines on its SOURCE_PATH.
                 // The Scala compiler needs them too, or a proto-generated
-                // class does not resolve. The text comes from memory, so
-                // nothing is written for them.
+                // class does not resolve. Scala 2 reads them from memory.
+                // Scala 3 needs them written.
                 additionalSourcePath = () =>
-                  mbtWorkspaceSymbolProvider.protoJavaOutlineSourcePaths(),
+                  if (ScalaVersions.isScala3Version(scalaTarget.scalaVersion))
+                    mbtWorkspaceSymbolProvider
+                      .materializedProtoJavaOutlineSourcePaths()
+                  else
+                    mbtWorkspaceSymbolProvider.protoJavaOutlineSourcePaths(),
                 // Read here, before the compiler reads an outline. A proto
                 // edit in between leaves this behind and the compiler is
                 // dropped unused, which is the safe way round. This also
