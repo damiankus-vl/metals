@@ -15,8 +15,8 @@ import scala.meta.io.AbsolutePath
  * (via [[MbtProtobufWorkspaceSymbolProvider]]) into a read-only file on disk,
  * so that goto-definition on a proto-generated class can open it.
  *
- * The outline is derived purely from the `.proto` file, so this needs no build
- * output and no configuration and works for every build tool. Files live under
+ * The outline comes from the `.proto` alone. This needs no build output and no
+ * configuration, and works for any build tool. Files live under
  * `.metals/readonly/` so clients treat them as read-only dependency sources.
  */
 object ProtoGeneratedJavaFiles {
@@ -39,12 +39,7 @@ object ProtoGeneratedJavaFiles {
       content: String,
   ): Option[AbsolutePath] =
     try {
-      protoPath.toRelativeInside(workspace).map { protoRelative =>
-        val javaFile = workspace
-          .resolve(Directories.dependencies)
-          .resolve(rootDirName)
-          .resolveZipPath(protoRelative.toNIO)
-          .resolve(s"$className.java")
+      pathFor(workspace, protoPath, className).map { javaFile =>
         writeIfChanged(javaFile, content)
         javaFile
       }
@@ -55,6 +50,26 @@ object ProtoGeneratedJavaFiles {
           e,
         )
         None
+    }
+
+  /**
+   * Where [[materialize]] would write `className.java`, without writing it.
+   *
+   * Derived from the proto alone, so it names an outline whether or not one is
+   * on disk. A compiler that was handed the text from memory reports positions
+   * against this path, and a file appears only when the user navigates to it.
+   */
+  def pathFor(
+      workspace: AbsolutePath,
+      protoPath: AbsolutePath,
+      className: String,
+  ): Option[AbsolutePath] =
+    protoPath.toRelativeInside(workspace).map { protoRelative =>
+      workspace
+        .resolve(Directories.dependencies)
+        .resolve(rootDirName)
+        .resolveZipPath(protoRelative.toNIO)
+        .resolve(s"$className.java")
     }
 
   /**

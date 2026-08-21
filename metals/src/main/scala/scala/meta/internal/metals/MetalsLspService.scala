@@ -1133,11 +1133,13 @@ abstract class MetalsLspService(
   ): CompletableFuture[Unit] = {
     val path = params.getTextDocument.getUri.toAbsolutePath
     savedFiles.add(path)
-    mbt2.didSave(path)
-    // The Java presentation compiler caches resolved symbols from the
-    // synthesized proto outline and won't re-request them until restarted.
+    val protoOutlinesChanged = mbt2.didSave(path)
+    // Both compilers cache what they resolved from the proto. The Java ones
+    // restart on any proto save. Rebuilding a Scala compiler costs more, so it
+    // happens only when the generated outlines changed.
     if (path.isProtoFilename) {
       compilers.restartJavaCompilers()
+      if (protoOutlinesChanged) compilers.restartScalaCompilers()
     }
     Future
       .sequence(
@@ -1226,14 +1228,17 @@ abstract class MetalsLspService(
       case None =>
         Future.successful(())
     })
-    // A proto file can change on disk without ever going through didSave,
-    // for example when a rename's workspace edit is applied to a file that
-    // isn't open in an editor. Without this, the synthesized outline and
-    // the Java presentation compiler's cached symbols go stale until the
-    // next full restart.
+    // A proto file can change on disk without going through didSave. A
+    // rename's workspace edit does this when the file is not open in an
+    // editor. Without this the synthesized outline goes stale, and so does
+    // what both presentation compilers cached from it.
     if (paths.exists(_.isProtoFilename)) {
-      paths.filter(_.isProtoFilename).foreach(mbt2.didSave)
+      // `map` runs `didSave` on each proto. `exists` on its own would stop at
+      // the first changed one and skip the rest.
+      val protoOutlinesChanged =
+        paths.filter(_.isProtoFilename).map(mbt2.didSave).contains(true)
       compilers.restartJavaCompilers()
+      if (protoOutlinesChanged) compilers.restartScalaCompilers()
     }
     futures += onChange(paths)
     Future.sequence(futures.result()).ignoreValue
@@ -1295,7 +1300,18 @@ abstract class MetalsLspService(
           Future {
             diagnostics.didDelete(path)
             testProvider.onFileDelete(path)
-            mbtSymbolSearch.onDidDelete(path)
+            // Drop the document first. A compiler built between the restart
+            // below and this would otherwise read the dead proto again, and
+            // stamp the version that says it is current.
+            val removed = mbtSymbolSearch.onDidDelete(path)
+            // A deleted proto generates no outlines. Both compilers keep
+            // resolving the generated classes from what they cached, so they
+            // are dropped. The Scala ones only when they were handed outlines.
+            if (path.isProtoFilename) {
+              compilers.restartJavaCompilers()
+              if (mbt2.didDeleteProto(path)) compilers.restartScalaCompilers()
+            }
+            removed
           }.flatten,
         )
       )

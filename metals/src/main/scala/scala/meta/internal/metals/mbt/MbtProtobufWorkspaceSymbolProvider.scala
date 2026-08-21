@@ -82,12 +82,12 @@ final class MbtProtobufWorkspaceSymbolProvider(
   }
 
   def generateProtoJavaOutlines(
-      doc: IndexedDocument,
+      document: IndexedDocument,
       requestedPackage: String,
   ): Iterator[VirtualTextDocument] = {
     val packagePath = requestedPackage.stripSuffix("/").replace('/', '.')
 
-    allJavaOutlines(doc).iterator.filter { outline =>
+    allJavaOutlines(document).iterator.filter { outline =>
       outline.packages.headOption
         .map(_.stripSuffix("/").replace('/', '.'))
         .contains(packagePath)
@@ -98,10 +98,22 @@ final class MbtProtobufWorkspaceSymbolProvider(
    * All Java outlines generated from the given proto document, regardless of
    * package.
    */
-  def allJavaOutlines(doc: IndexedDocument): Seq[VirtualTextDocument] = {
-    doc.getOrComputeJavaOutlines(() =>
+  def allJavaOutlines(document: IndexedDocument): Seq[VirtualTextDocument] =
+    generatedJavaOutlines(document).documents
+
+  /**
+   * Digests of the outlines [[allJavaOutlines]] returns, for a consumer that
+   * only needs to know whether a save changed them.
+   */
+  def javaOutlineDigests(document: IndexedDocument): Map[String, String] =
+    generatedJavaOutlines(document).digests
+
+  private def generatedJavaOutlines(
+      document: IndexedDocument
+  ): ProtoJavaOutlines = {
+    document.getOrComputeJavaOutlines(() =>
       try {
-        val input = doc.file.toInputFromBuffers(buffers)
+        val input = document.file.toInputFromBuffers(buffers)
         val source = new ProtoSourceFile(input.path, input.text)
         val file = ProtoParser.parse(source)
         val generator = new JavaOutlineGenerator(
@@ -128,9 +140,10 @@ final class MbtProtobufWorkspaceSymbolProvider(
             else ""
 
           scribe.debug(
-            s"mbt-v2: generated Java outline for $fullClassName from ${doc.file}"
+            s"mbt-v2: generated Java outline for $fullClassName from ${document.file}"
           )
-          val virtualUri = ProtoJavaVirtualFile.makeUri(doc.file, className)
+          val virtualUri =
+            ProtoJavaVirtualFile.makeUri(document.file, className)
           VirtualTextDocument(
             virtualUri,
             pc.Language.JAVA,
@@ -142,7 +155,7 @@ final class MbtProtobufWorkspaceSymbolProvider(
       } catch {
         case NonFatal(e) =>
           scribe.warn(
-            s"Failed to generate Java outline for proto ${doc.file}",
+            s"Failed to generate Java outline for proto ${document.file}",
             e,
           )
           Seq.empty

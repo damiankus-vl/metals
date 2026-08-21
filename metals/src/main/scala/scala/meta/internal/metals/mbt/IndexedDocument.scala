@@ -1,6 +1,5 @@
 package scala.meta.internal.metals.mbt
 
-import java.util.concurrent.atomic.AtomicReference
 import javax.tools.JavaFileObject
 
 import scala.collection.View
@@ -38,28 +37,19 @@ case class IndexedDocument(
     symbols: collection.Seq[Mbt.SymbolInformation],
     bloomFilter: StringBloomFilter,
 ) {
-  // Cached generated Java outlines from proto files.
+  // Cached generated Java outlines from proto files, with their digests.
   // This is lazily populated and automatically invalidated when
   // the proto file changes (new IndexedDocument replaces old one).
-  private val cachedProtobufJavaOutlines
-      : AtomicReference[Seq[VirtualTextDocument]] =
-    new AtomicReference(null)
+  private val cachedProtobufJavaOutlines =
+    new CachedValue[ProtoJavaOutlines]
 
   def getOrComputeJavaOutlines(
       compute: () => Seq[VirtualTextDocument]
-  ): Seq[VirtualTextDocument] = {
-    var result = cachedProtobufJavaOutlines.get()
-    if (result == null) {
-      val computed = compute()
-      cachedProtobufJavaOutlines.compareAndSet(null, computed)
-      result = cachedProtobufJavaOutlines.get()
-    }
-    result
-  }
+  ): ProtoJavaOutlines =
+    cachedProtobufJavaOutlines.getOrCompute(() => ProtoJavaOutlines(compute()))
 
-  def clearProtobufJavaOutlinesCache(): Unit = {
-    cachedProtobufJavaOutlines.set(null)
-  }
+  def clearProtobufJavaOutlinesCache(): Unit =
+    cachedProtobufJavaOutlines.clear()
 
   /**
    * The generated Java outlines cached by a previous
@@ -69,7 +59,7 @@ case class IndexedDocument(
    * still describes what earlier consumers (like the turbine classpath) saw.
    */
   def cachedJavaOutlines: Seq[VirtualTextDocument] =
-    Option(cachedProtobufJavaOutlines.get()).getOrElse(Seq.empty)
+    cachedProtobufJavaOutlines.getOrElse(ProtoJavaOutlines.empty).documents
 
   def toSemanticdbCompilationUnit(
       input: Input.VirtualFile

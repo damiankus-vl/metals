@@ -20,7 +20,9 @@ import scala.concurrent.ExecutionContext
 import scala.concurrent.ExecutionContextExecutor
 import scala.concurrent.Future
 import scala.reflect.internal.FatalError
+import scala.reflect.io.AbstractFile
 import scala.reflect.io.VirtualDirectory
+import scala.tools.nsc.InMemorySourceFile
 import scala.tools.nsc.ParsedLogicalPackage
 import scala.tools.nsc.Settings
 import scala.util.control.NonFatal
@@ -317,7 +319,14 @@ case class ScalaPresentationCompiler(
   ): Unit = {
     val errors = diags.filter(_.getSeverity == DiagnosticSeverity.Error)
     if (reportsLevel.isVerbose && errors.nonEmpty) {
-      val candidatePool = sourcePath.get().asScala.map(_.toString)
+      // Read off the compiler, not from `sourcePath`. Asking the supplier again
+      // would report what a source path holds now rather than what this
+      // compiler was built with, and Metals records the outlines it hands over
+      // as the supplier runs.
+      val candidatePool = mGlobal.settings.sourcepath.value
+        .split(File.pathSeparatorChar)
+        .filter(_.nonEmpty)
+        .toSeq
       val loadedFromSourcePath =
         try
           mGlobal.PruneLateSourcesComponent.loadedFromSource.toList
@@ -357,7 +366,7 @@ case class ScalaPresentationCompiler(
       EmptyCancelToken
     ) { pc =>
       pc.compiler()
-        .removeUnitOf(new MetalsSourceFile(uri.toString, Array.empty))
+        .removeUnitOf(new MetalsSourceFile(uri.toString, Array.empty[Char]))
       pc.compiler().richCompilationCache.remove(uri.toString())
     }(emptyQueryContext)
   }
@@ -927,13 +936,30 @@ case class ScalaPresentationCompiler(
       s"[$buildTargetIdentifier] using source path mode: ${config.sourcePathMode()}"
     )
 
+    // Read once, beside `listAllPackages`, so the sources match the package
+    // tree. Reading them later, during typechecking, would mix in edits made
+    // since.
+    val inMemorySources: Map[String, AbstractFile] =
+      semanticdbFileManager
+        .inMemorySourceFiles()
+        .asScala
+        .map { case (path, text) =>
+          path.toString -> new InMemorySourceFile(
+            name = path.getFileName.toString,
+            path = path.toString,
+            text = text
+          )
+        }
+        .toMap
+
     val rootSrcPackage = SimpleTimer.timedThunk(
       s"[$buildTargetIdentifier] collect logical packages",
       thresholdMillis = 1000
     ) {
       if (config.sourcePathMode() == SourcePathMode.MBT) {
         ParsedLogicalPackage.fromMbtIndex(
-          semanticdbFileManager.listAllPackages()
+          semanticdbFileManager.listAllPackages(),
+          inMemorySources
         )
       } else {
         val packages = semanticdbFileManager.listAllPackages().asScala
@@ -948,7 +974,10 @@ case class ScalaPresentationCompiler(
         val filteredPackages =
           packages.mapValues(ps => ps.asScala.filter(paths.contains).asJava)
         val rootPkg =
-          ParsedLogicalPackage.fromMbtIndex(filteredPackages.toMap.asJava)
+          ParsedLogicalPackage.fromMbtIndex(
+            filteredPackages.toMap.asJava,
+            inMemorySources
+          )
 
         val missingFromIndex = paths -- indexFiles
         if (missingFromIndex.nonEmpty) {

@@ -4,7 +4,9 @@ package scala.tools.nsc
 
 import java.io.File
 import java.net.URL
+import java.nio.file.InvalidPathException
 import java.nio.file.Path
+import java.nio.file.Paths
 import java.{util => ju}
 
 import scala.jdk.CollectionConverters._
@@ -48,8 +50,13 @@ class LogicalSourcePath(val dirs: Seq[File], rootPackage: LogicalPackage)
     }
   }
 
+  // `sourceFile` answers null for a path it cannot offer as a source, such as
+  // `/a/b/`. A missing file is different. `AbstractFile.getFile` returns a
+  // `PlainFile` for `/a/gone.java`, and the read fails later.
   private def sourcesIn(pkg: LogicalPackage): Seq[SourceFileEntry] =
-    pkg.sources.map(p => SourceFileEntryImpl(AbstractFile.getFile(p)))
+    pkg.sources.flatMap(p =>
+      Option(pkg.sourceFile(p)).map(SourceFileEntryImpl(_))
+    )
 
   private def packagesIn(pkg: LogicalPackage, prefix: String) = {
     val pre = if (prefix.isEmpty) prefix else s"$prefix."
@@ -110,6 +117,16 @@ trait LogicalPackage {
   def getPackage(name: String): Option[LogicalPackage]
 
   /**
+   * What the compiler should read for one of [[sources]], or null when there
+   * is nothing to read.
+   *
+   * A source is named by its path but need not be on disk. Metals synthesizes
+   * some. Asked per package, as the compiler resolves. A source nothing refers
+   * to goes unread.
+   */
+  def sourceFile(source: String): AbstractFile = AbstractFile.getFile(source)
+
+  /**
    * Pretty print the package tree.
    */
   def prettyPrint(): String = {
@@ -125,10 +142,23 @@ trait LogicalPackage {
     packages.sortBy(_.name).foreach(_.prettyPrintWith(indent + 4, sb))
     sources.foreach { s =>
       sb ++= (" " * (indent + 4))
-      sb ++= Option(AbstractFile.getFile(s)).map(_.name).getOrElse(s) + "\n"
+      sb ++= LogicalPackage.sourceName(s) + "\n"
     }
     sb
   }
+}
+
+object LogicalPackage {
+
+  /**
+   * The file name of a source path, `User.java` for `/a/b/User.java`.
+   *
+   * Read from the string, not the file system. A source that exists only in
+   * memory then prints the same as one on disk.
+   */
+  def sourceName(source: String): String =
+    try Option(Paths.get(source).getFileName).fold(source)(_.toString)
+    catch { case _: InvalidPathException => source }
 }
 
 /**
@@ -142,7 +172,8 @@ trait LogicalPackage {
  */
 class ParsedLogicalPackage(
     val name: String,
-    val parent: Option[ParsedLogicalPackage]
+    val parent: Option[ParsedLogicalPackage],
+    rootInMemorySources: Map[String, AbstractFile] = Map.empty
 ) extends LogicalPackage {
   require(
     (name.trim.isEmpty && parent.isEmpty) || (name.trim.nonEmpty && parent.nonEmpty),
@@ -153,6 +184,15 @@ class ParsedLogicalPackage(
 
   def this(name: String, parent: ParsedLogicalPackage) =
     this(name, Some(parent))
+
+  // Copied from the parent, not walked per lookup, so `a.b.c.d.User` costs
+  // what `User` does. Only the root is given a map. The deeper nodes come from
+  // `enterPackage`.
+  private val inMemorySources: Map[String, AbstractFile] =
+    parent.fold(rootInMemorySources)(_.inMemorySources)
+
+  override def sourceFile(source: String): AbstractFile =
+    inMemorySources.getOrElse(source, super.sourceFile(source))
 
   private val subpackages =
     mutable.LinkedHashMap.empty[String, ParsedLogicalPackage]
@@ -256,10 +296,17 @@ object ParsedLogicalPackage {
     global.rootPackage
   }
 
+  /**
+   * @param inMemorySources
+   *   what to read for a source that is not on disk, keyed by the same path
+   *   string `packages` names it by. A source absent from this map is read
+   *   from the file system.
+   */
   def fromMbtIndex(
-      packages: ju.Map[String, ju.Set[Path]]
+      packages: ju.Map[String, ju.Set[Path]],
+      inMemorySources: Map[String, AbstractFile] = Map.empty
   ): ParsedLogicalPackage = {
-    val root = new ParsedLogicalPackage("", None)
+    val root = new ParsedLogicalPackage("", None, inMemorySources)
 
     def isSupported(path: Path): Boolean = {
       val filename = path.getFileName.toString

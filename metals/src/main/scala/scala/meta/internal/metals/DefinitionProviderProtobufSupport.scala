@@ -21,6 +21,8 @@ import scala.meta.internal.{semanticdb => s}
 import scala.meta.io.AbsolutePath
 
 import org.eclipse.lsp4j.Location
+import org.eclipse.lsp4j.Position
+import org.eclipse.lsp4j.Range
 
 final class DefinitionProviderProtobufSupport(
     workspace: AbsolutePath,
@@ -77,12 +79,14 @@ final class DefinitionProviderProtobufSupport(
       protoSym.getDefinitionRange().toLspRange,
     )).headOption
 
-    protoLocation.fold(result) { loc =>
-      val allLocations = new ju.ArrayList[Location](result.locations.size() + 1)
-      allLocations.add(loc)
-      allLocations.addAll(result.locations)
-      result.copy(locations = allLocations)
-    }
+    // A compiler can report the same location twice for one symbol. Scala 3
+    // does this for an import that resolves in both the type and the term
+    // namespace. The proto declaration is added only when it is not there yet.
+    val existing = result.locations.asScala.toList
+    val added = protoLocation.filterNot(existing.contains).toList
+    val locations = (added ++ existing).distinct
+    if (locations == existing) result
+    else result.copy(locations = locations.asJava)
   } catch {
     case NonFatal(e) =>
       scribe.warn(
@@ -91,6 +95,40 @@ final class DefinitionProviderProtobufSupport(
       )
       result
   }
+
+  /**
+   * Where a proto-generated symbol is declared. Used when a compiler reported
+   * the symbol with no location of its own.
+   *
+   * The Java compiler reads the outline as an in-memory source and answers
+   * with its virtual URI. The Scala compiler reads the outline from its source
+   * path and has no position to report. This supplies the same virtual URI and
+   * resolves it the same way.
+   *
+   * Empty when proto definition support is off, and when the symbol is not
+   * proto-generated. Callers use this after their own lookup found nothing.
+   */
+  def protoDefinitionLocations(symbol: String): List[Location] =
+    if (!protobufLspConfig().definition) Nil
+    else {
+      for {
+        outline <- mbt.protoJavaOutlineFor(Symbol(symbol)).toList
+        result <- handleProtoJavaDefinition(
+          DefinitionResult(
+            ju.List.of(new Location(outline.uri().toString(), emptyRange)),
+            symbol,
+            None,
+            None,
+            symbol,
+          )
+        ).toList
+        location <- result.locations.asScala
+      } yield location
+    }
+
+  /** A placeholder. `handleProtoJavaDefinition` reads only the location's URI. */
+  private def emptyRange: Range =
+    new Range(new Position(0, 0), new Position(0, 0))
 
   def handleProtoJavaDefinition(
       res: DefinitionResult

@@ -11,6 +11,7 @@ import java.util.Comparator
 import java.util.concurrent.ConcurrentSkipListSet
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import java.{util => ju}
 import javax.tools.JavaFileManager
 import javax.tools.JavaFileObject
@@ -189,6 +190,43 @@ class MbtWorkspaceSymbolProvider(
     result.flatten.toSeq
   }
 
+  /**
+   * The synthesized Java outline that declares `symbol`. A member symbol like
+   * `com/example/jproto/User#getName().` is matched on its toplevel class,
+   * `User`.
+   *
+   * Gives navigation a location for a symbol the Scala compiler reported
+   * without one. That is what it reports for a class it read as a source-path
+   * outline.
+   */
+  def protoJavaOutlineFor(symbol: Symbol): Option[VirtualTextDocument] = {
+    // Called for any symbol no other lookup resolved, `scala/Option#get` as
+    // much as `com/example/jproto/User#getName`. The package index narrows it
+    // to the protos that could declare the symbol, which for a symbol from an
+    // ordinary library is none. Then the toplevel binary name decides.
+    val owner = symbol.toplevel.owner
+    // A proto with no package generates into the empty package. An outline
+    // spells it `""` and both a symbol and the index spell it `_empty_/`.
+    val outlinePackage = if (owner.isEmptyPackage) "" else owner.value
+    val binaryName = symbol.toplevelBinaryName
+    val protosInPackage = for {
+      indexed <- documentsByPackage.get(owner.value).toSeq
+      path <- indexed.asScala
+      protoPath = AbsolutePath(path)
+      if protoPath.isProtoFilename
+    } yield protoPath
+    val outlines = for {
+      protoPath <- protosInPackage.iterator
+      outline <- protoJavaOutlines(protoPath)
+      if outline.pkg == outlinePackage
+      if outline
+        .toplevelSymbols()
+        .asScala
+        .exists(Symbol(_).toplevelBinaryName == binaryName)
+    } yield outline
+    outlines.nextOption()
+  }
+
   private val turbineCompiler: TurbineCompiler[AbsolutePath] =
     new TurbineCompiler[AbsolutePath](
       () => documentsKeys,
@@ -258,15 +296,107 @@ class MbtWorkspaceSymbolProvider(
   /**
    * Clears cached Java outlines for a specific proto file.
    * Called when a proto file is saved and we need to regenerate outlines from buffers.
+   *
+   * Returns whether the save changed the generated outlines. A `// note` line
+   * added to a `.proto` does not change them. The caller rebuilds the Scala
+   * compilers when they did, so a false yes buys a rebuild.
    */
-  def didSave(path: AbsolutePath): Unit = {
-    if (path.isProtoFilename) {
+  def didSave(path: AbsolutePath): Boolean = {
+    if (!path.isProtoFilename) false
+    else {
+      val served = servedProtoOutlines.get(path)
       documents.get(path).foreach { doc =>
         invalidateCompiledProtoJavaOutlines(path, doc)
         doc.clearProtobufJavaOutlinesCache()
       }
+      // No entry means no Scala compiler was handed outlines for this proto,
+      // so none of them holds text this save replaces. A proto indexed after a
+      // compiler was built also has no entry, and that case is caught by
+      // `updateDocumentsKeys` instead, once indexing reaches it.
+      val changed = served.exists(_ != outlineDigestsOf(path))
+      if (changed) protoOutlineVersionCounter.incrementAndGet()
+      changed
     }
   }
+
+  /**
+   * Forgets the outlines served for a deleted `.proto`.
+   *
+   * Returns whether a Scala compiler was handed any. A running compiler holds
+   * the text it was built with, so it keeps resolving the generated classes of
+   * a proto that is gone until the caller drops it.
+   */
+  def didDeleteProto(path: AbsolutePath): Boolean = {
+    val wasServed =
+      path.isProtoFilename && servedProtoOutlines
+        .remove(path)
+        .exists(_.nonEmpty)
+    if (wasServed) protoOutlineVersionCounter.incrementAndGet()
+    wasServed
+  }
+
+  /**
+   * Counts the times the generated outlines changed under a running compiler.
+   *
+   * A compiler records this before it reads the outlines. A mismatch later
+   * means it holds text a proto edit has replaced. Dropping the compilers on
+   * the edit itself misses one that is still being built, since it is not in
+   * the compiler cache yet to be dropped.
+   *
+   * Comparing this is one number. Comparing what a compiler holds against the
+   * protos would be a digest per outline per request.
+   */
+  def protoOutlineVersion(): Long = protoOutlineVersionCounter.get()
+
+  /**
+   * The version to stamp on a Scala compiler now being built, recording the
+   * outlines it is about to be handed as one observation.
+   *
+   * The version is read first, so a proto edit that lands while the digests
+   * are being taken bumps past it and the compiler is dropped unused. That is
+   * the safe way round. Recording here rather than from the source path itself
+   * keeps the source path free of side effects, so a caller that reads it for
+   * a diagnostic cannot advance the record past what a compiler really read.
+   */
+  def beginServingProtoOutlines(): Long = {
+    val version = protoOutlineVersionCounter.get()
+    for (protoPath <- protoDocumentsKeys)
+      servedProtoOutlines.put(protoPath, outlineDigestsOf(protoPath))
+    version
+  }
+
+  private val protoOutlineVersionCounter = new AtomicLong(0)
+
+  /**
+   * A digest of the outline text last handed to a Scala compiler, keyed by
+   * `.proto` and then by outline URI.
+   *
+   * This is the only record of what a running compiler reads that survives a
+   * save. The compiler holds the source path it was built with. The document
+   * cache the outlines came from is cleared on save.
+   *
+   * A digest, not the text. The outline text is much larger than the `.proto`.
+   * This map outlives the document cache, so holding text would keep a
+   * superseded copy of an outline alive after the save that replaced it.
+   */
+  private val servedProtoOutlines =
+    TrieMap.empty[AbsolutePath, Map[String, String]]
+
+  /**
+   * Digests of the outlines the given `.proto` generates. Empty when the proto
+   * is not indexed, and when proto Java-package indexing is off, since then no
+   * outline reaches a source path.
+   *
+   * [[ProtoJavaOutlines]] computes these beside the outlines they describe, so
+   * the text is hashed once per version of the document rather than once per
+   * Scala compiler built.
+   */
+  private def outlineDigestsOf(protoPath: AbsolutePath): Map[String, String] =
+    if (!protobufWorkspace.isJavaPackageIndexingEnabled) Map.empty
+    else
+      documents
+        .get(protoPath)
+        .fold(Map.empty[String, String])(protobufWorkspace.javaOutlineDigests)
 
   /**
    * Excludes proto-generated classes that were compiled into the turbine
@@ -295,11 +425,25 @@ class MbtWorkspaceSymbolProvider(
         documents.get(path).foreach(_.clearProtobufJavaOutlinesCache())
       }
     }
+    // Once the classpath shows a shaded protobuf runtime, the outlines are
+    // regenerated naming it, `grpc_shaded.com.google.protobuf.Message` for
+    // `com.google.protobuf.Message`. A compiler built before that holds
+    // outlines referring to a runtime the classpath does not have. Their own
+    // package is unchanged. The prefix rewrites references in the text, not
+    // where the generated class lives.
+    protoOutlineVersionCounter.incrementAndGet()
   }
   // `documentsKeys` is effectively `documents.keys.par` but without the
   // overhead to copy the keys into a parallel collection at query time.  Make
   // sure to call updateDocumentsKeys() when you add or remove a document.
   @volatile private var documentsKeys = ParArray.empty[AbsolutePath]
+
+  // The `.proto` subset of `documentsKeys`, for the source path a compiler
+  // build assembles. Without this it walks the whole index to reach the protos,
+  // which are a small part of it. Goto-definition goes through
+  // `documentsByPackage` instead, which narrows further.
+  @volatile private var protoDocumentsKeys = Seq.empty[AbsolutePath]
+
   private val isIndexRead = new AtomicBoolean(false)
 
   // Maps SemanticDB package symbol (for example, "scala/collection/") to all
@@ -625,11 +769,80 @@ class MbtWorkspaceSymbolProvider(
   }
 
   override def listAllPackages(): ju.Map[String, ju.Set[Path]] = {
-    documentsByPackage
-      .mapValues(set => ju.Collections.unmodifiableSet(set))
+    val result = new ju.HashMap[String, ju.Set[Path]]()
+    // The live set is wrapped, not copied. Copying here would copy the whole
+    // index, and this runs on each presentation-compiler build.
+    for ((packageName, indexed) <- documentsByPackage)
+      result.put(packageName, ju.Collections.unmodifiableSet(indexed))
+    // Only a package an outline declares is rebuilt, and a package the index
+    // does not know at all is added.
+    val packageToOutlines = protoJavaOutlineFiles().groupBy(_.packageSymbol)
+    for ((packageName, outlines) <- packageToOutlines) {
+      val merged = new ju.HashSet[Path](
+        result.getOrDefault(packageName, ju.Collections.emptySet())
+      )
+      for (outline <- outlines) merged.add(outline.file)
+      result.put(packageName, ju.Collections.unmodifiableSet(merged))
+    }
+    result
+  }
+
+  /**
+   * The proto Java outlines, for a Scala target's presentation-compiler source
+   * path. Nothing is written. The compiler is handed the text through
+   * [[inMemorySourceFiles]].
+   *
+   * Pruned source-path mode keeps an indexed file only when the source path
+   * names it too, so an outline has to appear here and in [[listAllPackages]].
+   */
+  def protoJavaOutlineSourcePaths(): Seq[Path] =
+    protoJavaOutlineFiles().map(_.file)
+
+  /**
+   * The synthesized outlines, so a Scala compiler can read them without a file
+   * on disk. Keyed by the same paths [[protoJavaOutlineSourcePaths]] puts on
+   * the source path. That is how the compiler recognizes them.
+   */
+  override def inMemorySourceFiles(): ju.Map[Path, String] =
+    protoJavaOutlineFiles()
+      .map(outline => outline.file -> outline.text)
       .toMap
       .asJava
-  }
+
+  /**
+   * The Java outlines the workspace's protos generate, as source files.
+   *
+   * The Scala counterpart to [[TurbineCompiler.listCombinedSourcepath]]. The
+   * index maps a package to `model.proto` itself. Scalac cannot parse a
+   * `.proto`.
+   *
+   * A path names an outline whether or not a file is on it. The compiler is
+   * handed the text through [[inMemorySourceFiles]], so nothing is written
+   * until navigation sends the client to a file.
+   */
+  private def protoJavaOutlineFiles(): Seq[ProtoOutlineFile] =
+    protoDocumentsKeys.flatMap(protoJavaOutlineFilesOf)
+
+  /** [[protoJavaOutlineFiles]] for a single `.proto`. */
+  private def protoJavaOutlineFilesOf(
+      protoPath: AbsolutePath
+  ): Seq[ProtoOutlineFile] =
+    if (!protobufWorkspace.isJavaPackageIndexingEnabled) Nil
+    else
+      for {
+        document <- documents.get(protoPath).toSeq
+        outline <- protobufWorkspace.allJavaOutlines(document)
+        className <- ProtoJavaVirtualFile
+          .extractClassName(outline.uri().toString())
+          .toSeq
+        javaFile <- ProtoGeneratedJavaFiles
+          .pathFor(workspace, protoPath, className)
+          .toSeq
+      } yield ProtoOutlineFile(
+        packageSymbol = outline.pkg,
+        file = javaFile.toNIO,
+        text = outline.text,
+      )
 
   def document(file: AbsolutePath): Option[IndexedDocument] = {
     documents.get(file)
@@ -1130,6 +1343,17 @@ class MbtWorkspaceSymbolProvider(
   ): ParArray[AbsolutePath] = {
     val newValue = ParArray.fromSpecific(documentsIndex.keysIterator)
     documentsKeys = newValue
+    val newProtoKeys =
+      documentsIndex.keysIterator.filter(_.isProtoFilename).toSeq
+    // A compiler holds the source path it was built with, so it does not learn
+    // of a proto the index gained or lost since. Startup is where this shows.
+    // `onReindex` runs beside `onInitialized`, so a compiler built before the
+    // index reached the protos would hold a source path without them.
+    // `didSave` cannot report it, having no digests to compare for a proto that
+    // was not served.
+    if (newProtoKeys.toSet != protoDocumentsKeys.toSet)
+      protoOutlineVersionCounter.incrementAndGet()
+    protoDocumentsKeys = newProtoKeys
     newValue
   }
 

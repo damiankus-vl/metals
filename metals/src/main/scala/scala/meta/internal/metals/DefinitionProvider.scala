@@ -80,6 +80,11 @@ final class DefinitionProvider(
     protobufLspConfig,
     mtags,
   )
+
+  /** See [[DefinitionProviderProtobufSupport.protoDefinitionLocations]]. */
+  def protoDefinitionLocations(symbol: String): List[Location] =
+    protobufDefinitions.protoDefinitionLocations(symbol)
+
   val destinationProvider = new DestinationProvider(
     index,
     buffers,
